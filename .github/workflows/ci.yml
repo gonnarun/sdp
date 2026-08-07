@@ -17,10 +17,17 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to a commit SHA, not a tag: a tag is mutable and can
+      # be repointed at new code after review. This repo's whole premise is that
+      # a reviewer binary must resolve through a trusted path, so trusting a
+      # movable ref here would be inconsistent. The trailing comment is the human
+      # -readable version; bump both together.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          # 3.9 is the MINIMUM version README claims support for, so that is what
+          # CI proves. Newer interpreters are a superset for stdlib-only code.
           python-version: '3.9'
 
       - name: Install shellcheck (Linux)
