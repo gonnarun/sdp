@@ -1,0 +1,38 @@
+{
+  "name": "sdp",
+  "version": "0.1.0+codex.20260807005555",
+  "description": "Shared staged-workflow plugin for Codex with an external Claude Code review gate and agy fallback.",
+  "author": {
+    "name": "run2u"
+  },
+  "keywords": [
+    "workflow",
+    "sdp",
+    "mcp",
+    "review-gate",
+    "claude",
+    "agy",
+    "batch-sdp",
+    "worktree-dispatch",
+    "precompact"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.codex.json",
+  "interface": {
+    "displayName": "SDP",
+    "shortDescription": "Run SDP staged workflows in Codex",
+    "longDescription": "SDP packages single-task, batch, worktree-dispatch, and precompact workflows for Codex and exposes a bundled MCP review gate that asks Claude Code first and falls back to agy only on infrastructure failure.",
+    "developerName": "run2u",
+    "category": "Engineering",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use SDP for this change"
+    ],
+    "brandColor": "#2563EB",
+    "screenshots": []
+  }
+}

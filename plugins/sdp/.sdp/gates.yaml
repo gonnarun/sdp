@@ -1,0 +1,20 @@
+# SDP gate + escalation config (read by review_gate.py; names checked here).
+# model + timeouts are sourced from this file, never env (ADR-004 D2 table).
+mode: unattended                # EXPLICIT (REQ-002). `attended` would reopen the override path REQ-019 forbids.
+model: ""                       # sole reviewer-model source (claude+agy), never env; empty = provider default
+claude_timeout: 300             # claude reviewer wall cap (s); clamped to GATE_WALL_BUDGET (550)
+codex_timeout: 480              # codex reviewer wall cap (s); clamped to GATE_WALL_BUDGET (550)
+agy_timeout: 30                 # was 300 — deliberate for this repo (ADR-B03): agy is a BLOCK signal here
+require_primary_verdict: false  # true => an agy-fallback ALLOW is refused as INFRA_ERROR (ADR-G17)
+cadence:
+  escalate_from: 6              # planner-solo hard-blocked from this cumulative BLOCK
+  review_on: even               # 6,8,10,12 -> TEAM_REVIEW
+halt:
+  max_block: 13                 # 12th review executes; 13th entry halts (D-07)
+  pivot_cap: 2
+  max_stall: 5                  # consecutive ESCALATION_STALLs before .halt (absent-key default is 5)
+require_checklist: false        # migrated-off-old-core projects set true
+# review_checklist_include: .sdp/project-rules.md   # OPTIONAL — set only if file exists
+infra_error_policy:
+  attended: warn_flag_continue  # stage may advance; merge/push refused while infra_flag exists
+  unattended: pause_notify

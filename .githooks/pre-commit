@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Fast pre-commit gate (ADR-007 (5)): regen-check + orphan-detector + packaging
+# + smoke + lint. Seconds, no model calls. Blocks a commit that breaks any of them
+# -- including a stale root mirror or a stale host-divergent codex manifest.
+bash "$repo_root/tests/run.sh" --fast
+
+# Bump the install-cache-key manifests. This is the ONE legitimate hook write:
+# a per-commit cachebuster. Generator output is verified above, never staged.
+python3 "$repo_root/scripts/bump_codex_plugin_version.py"
+git add -- \
+  "$repo_root/plugins/sdp/.claude-plugin/plugin.json" \
+  "$repo_root/plugins/sdp/.codex-plugin/plugin.json"

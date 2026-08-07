@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sdp_review_gate": {
+      "command": "python3",
+      "args": [
+        "./scripts/sdp_mcp_server.py"
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 660,
+      "cwd": "."
+    }
+  }
+}

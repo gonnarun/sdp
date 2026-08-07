@@ -1,0 +1,74 @@
+# SDP project config (this repo dogfoods SDP on itself).
+base_dir: .private/sdp-artifacts
+output_locale: auto
+sdp_version: "0.1"
+
+# opaque, project-specific commands (SDP is a bash/markdown plugin — mostly shellcheck)
+build:
+  install: ""
+  build: ""
+  lint: "shellcheck plugins/sdp/scripts/*.sh plugins/sdp/scripts/lib/*.sh"
+  typecheck: ""
+
+test:
+  # Every tests/*.sh (except the runner) is reachable from exactly one command,
+  # and every layer entry resolves to a defined command. tests/run.sh --fast's
+  # orphan detector enforces this so the next orphan cannot accumulate silently.
+  commands:
+    smoke: "bash tests/smoke.sh"
+    integration: "bash tests/gate_integration.sh"
+    bump: "bash tests/bump.sh"
+    packaging: "bash tests/codex_plugin.sh"
+    concurrency: "bash tests/concurrency.sh"
+    mcp_server: "bash tests/mcp_server.sh"
+    review_gate: "bash tests/review_gate.sh"
+    gate_marker: "bash tests/gate_marker.sh"
+    adapters: "bash tests/adapters.sh"
+    config_safety: "bash tests/config_safety.sh"
+    docs: "bash tests/docs.sh"
+    i18n: "bash tests/i18n.sh"
+    regression: "bash tests/regression.sh"
+    run_segment: "bash tests/run_segment.sh"
+  layers:
+    # every layer name here must have a matching test.commands.<name>.
+    # Downstream projects add their own layers AND the matching commands.
+    mandatory: [smoke, integration, bump, packaging]
+    risk_gated: [concurrency, mcp_server, review_gate, gate_marker]
+    supporting: [adapters, config_safety, docs, i18n, regression, run_segment]
+  db:
+    isolation: dedicated_test_db
+  guards:
+    require_test_marker: true
+
+migrate:
+  prod_block: true
+
+# worktree runtime isolation (REQ-T-08): serial_main = sessions produce checklists only,
+# main runs screen tests serially after merge (default, infra-free). ephemeral_per_worktree
+# = opt-in per-worktree docker/db/ports (project must parameterize; else auto-falls back).
+worktree:
+  runtime_isolation: serial_main   # serial_main | ephemeral_per_worktree
+  port_strategy: fixed             # fixed | dynamic
+
+# dispatch adapters (REQ-C-03 / REQ-C-07). batch_engine/worktree_mode default to the
+# classifier-safe paths; the tmux/auto paths use scripts/run_segment_tmux.sh when tmux+claude
+# are present and the codex auto-mode classifier does not block, else fall back.
+dispatch:
+  batch_engine: agent_tool         # agent_tool (default) | tmux_long_lived
+  worktree_mode: manual            # manual (default) | auto
+  session_prefix: sdp-seg          # tmux session-name prefix (de-domained)
+  default_timeout: 14400           # run_segment_tmux.sh MODE timeout (seconds) — time hard cap (NFR-05)
+  rules_include: ""                # optional project rules file(s) injected into the session prompt
+  token_budget: 0                  # per-task token hard cap (NFR-05); 0 = off. NOT a live enforced budget
+                                   # (N9): no writer for used-tokens has ever existed, so the guard only
+                                   # fires when SDP_TOKENS_USED (env) or ${BATCH_DIR}/.tokens_used is
+                                   # supplied by a future accounting hook (see KNOWN_GAPS). Kept for that writer.
+
+# 6-project regression harness (AC-12 / NFR-07): confirm the plugin installs/anchors and
+# its gate is not weakened across the reference projects. Colon-separated absolute paths;
+# empty = none configured (self-test uses a synthetic fixture). Run: scripts/sdp-regression.sh
+regression:
+  projects: ""                     # e.g. "/path/project-one:/path/project-two:..."
+
+# forced_ext: domain rules (extend only; base safety keys may only strengthen)
+forced_ext: {}

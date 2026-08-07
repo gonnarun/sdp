@@ -1,0 +1,22 @@
+# SDP runtime artifacts (anchor output, gate state/logs, audit ndjson, thread locks)
+.private/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python bytecode cache (scripts/*.py compiled by the gate/MCP runtime)
+__pycache__/
+*.pyc
+
+# Editor / tooling noise
+*.swp
+*~
+.idea/
+.vscode/
+.claude/scheduled_tasks.lock
+
+# Local env / secrets (never commit tokens)
+.env
+*.local
+override.token

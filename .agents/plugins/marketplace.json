@@ -1,0 +1,20 @@
+{
+  "name": "sdp-marketplace",
+  "interface": {
+    "displayName": "SDP"
+  },
+  "plugins": [
+    {
+      "name": "sdp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sdp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Engineering"
+    }
+  ]
+}

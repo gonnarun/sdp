@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reason"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["ALLOW", "BLOCK", "INFRA_ERROR"] },
+    "reason": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "criterion": { "type": "string" },
+          "detail": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "minor", "major", "block"] }
+        }
+      }
+    }
+  }
+}

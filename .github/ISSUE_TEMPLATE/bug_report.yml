@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in SDP behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** file a security issue here — see [SECURITY.md](https://github.com/gonnarun/sdp/blob/master/SECURITY.md) for private reporting.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Config in `.sdp/defaults.yaml`: ...
+        2. Ran `/sdp ...`
+        3. Gate returned ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Review gate (review_gate.py)
+        - MCP server (sdp_mcp_server.py)
+        - Anchor / config discovery (sdp-anchor.sh)
+        - Dispatch (batch-sdp / worktree-dispatch / run_segment_tmux.sh)
+        - Stage templates (core/)
+        - Packaging / install
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: SDP version
+      description: The `version` field in `plugins/sdp/.claude-plugin/plugin.json`, or the installed plugin version.
+      placeholder: "0.1.37"
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, `python3 --version`, host (Claude Code / Codex) and its version, and which reviewer CLIs are on PATH.
+      placeholder: |
+        macOS 15.5 / Python 3.11.9 / Claude Code
+        codex 0.141.0, claude present, agy not installed
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Gate doctor output
+      description: Output of `python3 scripts/review_gate.py doctor`, if the issue touches the gate.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Gate verdict lines, test failures, or error text. Redact anything sensitive.
+      render: text

@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      # Fails on a stale root mirror, an orphaned test suite, a packaging
+      # regression, a smoke failure, or a shellcheck finding.
+      - name: Fast suite
+        run: bash tests/run.sh --fast
+
+      # Every layer in .sdp/defaults.yaml. No network, no model calls: the gate
+      # suites drive review_gate.py through its test seams, not a live reviewer.
+      - name: Full suite
+        run: bash tests/run.sh

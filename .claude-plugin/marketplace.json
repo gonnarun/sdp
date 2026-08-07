@@ -1,0 +1,11 @@
+{
+  "name": "sdp-marketplace",
+  "owner": { "name": "run2u" },
+  "plugins": [
+    {
+      "name": "sdp",
+      "source": "./plugins/sdp",
+      "description": "Shared staged-workflow & worktree dispatch plugin (sdp / batch-sdp / worktree-dispatch)."
+    }
+  ]
+}

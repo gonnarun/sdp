@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a change or addition to SDP
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that SDP makes hard or impossible? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What you would like SDP to do.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Review gate / escalation
+        - Commands (sdp / batch-sdp / worktree-dispatch / precompact)
+        - Stage templates (core/)
+        - Configuration schema
+        - Host support (Claude Code / Codex / other)
+        - Testing
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: gate
+    attributes:
+      label: Gate impact
+      description: |
+        Would this weaken any fail-closed path, widen a trust class, or let an agent
+        influence its own review? If so, say so up front — that is a design decision
+        worth discussing, not a blocker by itself. Write "none" if it does not touch the gate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
