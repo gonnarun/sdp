@@ -31,12 +31,18 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install shellcheck
 
+      # No reviewer CLI (codex / claude) and no tmux are installed here, by
+      # design: CI must not depend on an authenticated model account. The gate
+      # suites drive review_gate.py through tests/lib/harness.py's stub binary
+      # resolver, so they run fully. Two assertions self-skip in this
+      # environment and say so in the log — smoke.sh's doctor toolchain axis and
+      # tests/run_segment.sh's MODE logic. Everything else is exercised.
+
       # Fails on a stale root mirror, an orphaned test suite, a packaging
       # regression, a smoke failure, or a shellcheck finding.
       - name: Fast suite
         run: bash tests/run.sh --fast
 
-      # Every layer in .sdp/defaults.yaml. No network, no model calls: the gate
-      # suites drive review_gate.py through its test seams, not a live reviewer.
+      # Every layer in .sdp/defaults.yaml. No network, no model calls.
       - name: Full suite
         run: bash tests/run.sh

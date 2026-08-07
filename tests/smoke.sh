@@ -26,6 +26,21 @@ prt="$(CLAUDE_PROJECT_DIR="$PJ2" XDG_CONFIG_HOME="$GX" bash "$SDP_ROOT/scripts/s
   && ok "project .sdp/ beats global config (precedence)" || bad "project precedence"
 rm -rf "$GX" "$PJ" "$PJ2"
 
-python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$TMP" doctor >/dev/null 2>&1 && ok "review gate doctor exit 0" || bad "review gate doctor"
+# doctor reports TWO axes and exits non-zero if either is unhealthy: `toolchain`
+# (is a primary reviewer trustably resolvable) and `gate-state` (is any artifact
+# wedged). A clean CI runner and a fresh clone have NEITHER `codex` nor `claude`
+# installed, so a non-zero exit there is doctor working correctly, not a defect.
+# Assert the axis this suite owns -- gate-state -- and skip the toolchain axis
+# when no reviewer is present, in the same shape as tests/run_segment.sh.
+dout="$(python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$TMP" doctor 2>&1)"; drc=$?
+if [ "$drc" -eq 0 ]; then
+  ok "review gate doctor exit 0"
+elif printf '%s' "$dout" | grep -qF 'gate-state=ok'; then
+  echo "SKIP - no primary reviewer CLI (codex/claude) resolvable; toolchain axis not exercised"
+  ok "review gate doctor: gate-state ok"
+else
+  bad "review gate doctor"
+  printf '%s\n' "$dout" | sed 's/^/       /'
+fi
 
 echo "-------- $P passed, $F failed --------"; [ "$F" -eq 0 ]

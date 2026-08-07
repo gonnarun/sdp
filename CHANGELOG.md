@@ -10,6 +10,9 @@ SDP is pre-1.0: config keys, marker grammar and the gate CLI may change between 
 - Open-source release scaffolding: MIT `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, this changelog, GitHub issue/PR templates, and a CI workflow running the full test suite.
 - English `COMMAND_MANUAL.md` with a Korean sync copy (`COMMAND_MANUAL.ko.md`).
 
+### Fixed
+- `tests/smoke.sh` no longer fails on a machine with no reviewer CLI installed. `doctor` reports two axes and exits non-zero if either is unhealthy; the suite now asserts the `gate-state` axis it owns and self-skips the `toolchain` axis when neither `codex` nor `claude` is resolvable, matching `tests/run_segment.sh`'s existing skip. A wedged gate still fails the suite.
+
 ### Changed
 - Rewrote both READMEs for public consumption: requirements table, quick start, repository layout, development workflow, an explanation of the optional `agy` fallback reviewer, and a Status section that reflects shipped behavior instead of the pre-implementation draft.
 - Redacted the six private source repositories SDP was extracted from as `Project-A` … `Project-F` across the remaining design documents.
