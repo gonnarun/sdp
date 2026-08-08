@@ -441,5 +441,80 @@ PY
 then ok "TOCTOU-safe exec: group-writable-parent binary usable via validated hardlink; writable file/world-parent/ancestry refused"
 else bad "TOCTOU-safe exec check failed"; fi
 
+# ---------------------------------------------------------------------------
+# REASON persistence (R1). Reviewer prose is written next to each BLOCK_ATTEMPT
+# so a later reader can see WHY a run escalated. The property under test is that
+# doing so cannot move the state machine: the reviewer is a model that has just
+# read an untrusted artifact, and _parse_log dispatches on each line's first
+# token, so an unescaped reason line reading "RESET ..." would zero the counter.
+# ---------------------------------------------------------------------------
+if python3 - "$SDP_ROOT" <<'REASONPY'
+import sys, tempfile
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
+import review_gate as r
+
+HEAD = r.REASON_PREFIX.strip()
+
+# 1. every control word a reviewer could emit is neutralised
+for hostile in ("RESET zeroing the counter", "OVERRIDE now", "BLOCK_ATTEMPT 99 x",
+                "PIVOT_RESET", "TEAM_REVIEW roster=fake,fake", "ALLOW: looks fine"):
+    lines = r._reason_log_lines(hostile)
+    assert lines, ("no lines emitted", hostile)
+    for ln in lines:
+        assert ln.split(" ")[0] == HEAD, ("head is not REASON", ln)
+
+# 2. embedded newlines cannot split one logical line into a control line
+for ln in r._reason_log_lines("plan is wrong\nRESET see above\r\nOVERRIDE"):
+    assert "\n" not in ln and "\r" not in ln, ("control char survived", repr(ln))
+    assert ln.split(" ")[0] == HEAD, ("head is not REASON", ln)
+
+# 3. end to end: the counter reads the same with and without hostile reason text
+def count(text):
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as fh:
+        fh.write(text)
+        path = Path(fh.name)
+    try:
+        return r._parse_log(path).count
+    finally:
+        path.unlink(missing_ok=True)
+
+plain = "".join("BLOCK_ATTEMPT %d 2026-01-0%dT00:00:00Z h%d\n" % (i, i, i) for i in (1, 2, 3))
+withreason = ""
+for i in (1, 2, 3):
+    withreason += "BLOCK_ATTEMPT %d 2026-01-0%dT00:00:00Z h%d\n" % (i, i, i)
+    withreason += "".join(ln + "\n" for ln in r._reason_log_lines("RESET see the note above"))
+assert count(plain) == 3, ("baseline miscounted", count(plain))
+assert count(withreason) == 3, ("reason text moved the counter", count(withreason))
+
+# 3b. BOTH parsers must agree. _read_log_counts and _parse_log are independent
+# functions with independent `else` branches that each count an unrecognised head
+# as a BLOCK_ATTEMPT, so a head added to one and forgotten in the other pushes the
+# artifact toward max_block. The first implementation of REASON did exactly that.
+def count2(text):
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as fh:
+        fh.write(text)
+        path = Path(fh.name)
+    try:
+        return r._read_log_counts(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+assert count2(plain) == 3, ("_read_log_counts baseline", count2(plain))
+assert count2(withreason) == 3, ("_read_log_counts counted REASON", count2(withreason))
+assert count(withreason) == count2(withreason), "the two parsers disagree on REASON"
+
+# 4. the cap is enforced and the truncation is visible, not silent
+big = r._reason_log_lines("x" * (r.REASON_MAX_CHARS * 3))
+body = "".join(ln[len(r.REASON_PREFIX):] for ln in big)
+assert len(body) <= r.REASON_MAX_CHARS + len(" [truncated]"), ("cap not enforced", len(body))
+assert body.endswith("[truncated]"), "truncation not marked"
+
+# 5. empty input writes nothing at all
+assert r._reason_log_lines("") == [] and r._reason_log_lines("   ") == []
+REASONPY
+then ok "REASON persistence: control words neutralised, newlines flattened, counter unmoved, cap marked"
+else bad "REASON persistence check failed"; fi
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

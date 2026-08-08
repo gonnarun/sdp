@@ -96,6 +96,13 @@ DEFAULT_MAX_OUTPUT_BYTES = 131_072
 # so primary + fallback + drain never exceed the wall budget. [REQ-010/024]
 GATE_WALL_BUDGET = 550
 GATE_DRAIN_GRACE = 5
+
+# Reviewer prose persisted next to each BLOCK_ATTEMPT (REQ: post-hoc analysability).
+# The prefix is a control word _parse_log skips, which is the whole safety property --
+# see _reason_log_lines. Caps bound how much a reviewer can append per verdict.
+REASON_PREFIX = "REASON "
+REASON_MAX_CHARS = 2000
+REASON_LINE_CHARS = 400
 MODEL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")               # claude model syntax
 # REQ-012 (M6): real agy model names carry spaces/parens ("Gemini 3 Pro (High)").
 # Fixture-backed in tests; captured from the real `agy` binary.
@@ -1030,6 +1037,39 @@ def _reason_hash(text: str) -> str:
     return hashlib.sha1(first.encode("utf-8")).hexdigest()[:12]
 
 
+def _reason_log_lines(text: str) -> list[str]:
+    """Render reviewer prose as log lines that CANNOT act on the state machine.
+
+    The gate log is a line-oriented control format: ``_parse_log`` dispatches on the
+    first whitespace-delimited token of every line, and ``RESET``/``OVERRIDE`` zero the
+    escalation counter. Reason text is written by a model that has just read an
+    artifact treated as untrusted data, so writing it verbatim would make that model's
+    output control input -- a line beginning ``RESET`` would silently un-escalate the
+    run. Every line therefore leaves here carrying REASON_PREFIX, which ``_parse_log``
+    skips before it dispatches.
+
+    Two further hazards are closed at the writer, never at the reader:
+
+    * embedded CR/LF and other C0 controls would split one logical line into several,
+      re-opening the same vector one layer down, so they are replaced, not stripped
+      (dropping them could weld two tokens into a new one);
+    * unbounded prose would let a reviewer inflate the log without limit, so the text
+      is capped and the truncation is marked in-band rather than left silent.
+    """
+    if not text:
+        return []
+    flat = "".join(" " if (ch < " " or ch == "\x7f") else ch for ch in text)
+    flat = " ".join(flat.split())
+    if not flat:
+        return []
+    if len(flat) > REASON_MAX_CHARS:
+        flat = flat[:REASON_MAX_CHARS] + " [truncated]"
+    return [
+        REASON_PREFIX + flat[i:i + REASON_LINE_CHARS]
+        for i in range(0, len(flat), REASON_LINE_CHARS)
+    ]
+
+
 def _read_log_counts(log: Path) -> int:
     # Fail-closed: unreadable/garbled -> INFRA_ERROR, NEVER count=0.
     if not log.exists():
@@ -1049,7 +1089,8 @@ def _read_log_counts(log: Path) -> int:
         elif head == "BLOCK_ATTEMPT":
             count += 1
         elif head in ("ALLOW", "INFRA_ERROR", "TEAM_REVIEW", "TEAM_CARRY",
-                      "ESCALATION_STALL", "MARKER_AUDIT_FAILED"):
+                      "ESCALATION_STALL", "MARKER_AUDIT_FAILED",
+                      REASON_PREFIX.strip()):
             # D-4: BOTH new heads are counter-neutral HERE as well as in
             # _parse_log. The two tables are independent functions with
             # independent `else` branches, and both else branches do count += 1 --
@@ -1117,6 +1158,14 @@ def _parse_log(log: Path) -> _LogState:
             last_marker = ""   # a new attempt clears any pending team marker
             stall_run = 0
             stall_trailing = False
+        elif head == REASON_PREFIX.strip():
+            # Reviewer-authored prose, persisted for post-hoc analysis and INERT to
+            # the state machine: it touches no counter, no hash, no timestamp and no
+            # marker. The prefix is applied by _reason_log_lines at write time, which
+            # is what keeps this branch safe -- a reviewer line reading "RESET ..."
+            # arrives here as "REASON RESET ..." and is skipped, instead of taking
+            # the RESET branch and zeroing the escalation counter.
+            continue
         elif head in ("TEAM_REVIEW", "TEAM_CARRY"):
             last_marker = line
         elif head == "MARKER_AUDIT_FAILED":
@@ -1851,6 +1900,13 @@ def run_review(
             new_count = count + 1
             if not _append_line(paths["log"], f"BLOCK_ATTEMPT {new_count} {_now_z()} {_reason_hash(final.line)}"):
                 raise InfraError("BLOCK_ATTEMPT append failed")
+            # The reviewer's stated reason, persisted so a later reader can see WHY a
+            # run escalated. Written AFTER the counting line and deliberately NOT
+            # fail-closed: these lines are inert to the state machine, so losing them
+            # costs analysability, while raising here would turn a disk hiccup into a
+            # refused verdict that had already been decided.
+            for _reason_line in _reason_log_lines(final.line):
+                _append_line(paths["log"], _reason_line)
             halted = new_count >= max_block
             if halted and not _write_flag(paths["halt"], "max_block reached\n"):
                 # ADR-G09: previously unchecked -- a non-sticky halt is REQ-004
