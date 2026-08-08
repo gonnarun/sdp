@@ -214,6 +214,27 @@ The summary is a **required-reference index, not a replacement** for the origina
 
 At a review gate, do not send a user-approval request — review the artifact with the inverse (cross-model) gate: the primary reviewer is the **opposite** model of the author. In **codex** the primary reviewer is **Claude Code** (the MCP tool `claude_review_gate`); in **Claude Code** the primary reviewer is **codex** (`review_gate.py --reviewer codex`, the CLI default). **agy** is the fallback for both directions, only on the primary's infrastructure failure — never on a content `BLOCK:`. On the codex side prefer the MCP tool `claude_review_gate`; on the Claude Code side run `scripts/review_gate.py --reviewer codex`.
 
+### Every gate invocation carries the BLOCK output contract ★
+
+The six-field contract is defined in `Stage4_design_plan.md` and repeated in
+`Stage7_test_exec.md`, but it lives there as literal prompt text — so a gate call made
+anywhere else omits it, and the reviewer then returns bare prose that names no fix and
+no scope. **Append it to the prompt of every `review_gate.py` / `claude_review_gate`
+call, including ad-hoc ones outside Stage 4 and Stage 7:**
+
+```
+Every finding MUST comply with the SDP BLOCK output contract: all six fields (WHERE, WHY,
+FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or
+must-be-recorded-instead, any field you cannot supply labelled exactly
+'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with
+CHECKED-AND-CLEAN and IF-ONLY-ADVISORY.
+```
+
+`SCOPE` is the load-bearing field: it is the reviewer's own judgement of whether a finding
+can be closed by editing the artifact in hand or belongs in the non-conformance register.
+Without it the author cannot tell a fixable defect from one that needs new measurement,
+and rounds get spent discovering that distinction one objection at a time.
+
 MCP arguments: `cwd` (repository root), `prompt` (review prompt), `artifact_path` (plan, fix-plan, design, or test-result path); optional `reviewer` (`codex`|`claude`) defaults to `claude` — the opposite of the codex caller.
 
 CLI fallback (pick `--reviewer` = the **opposite** model of the author):

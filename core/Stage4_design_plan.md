@@ -190,6 +190,12 @@ The verdict MUST also close with:
 
 ### Verdict handling
 - `ALLOW:` → next stage.
+- **Before re-submitting, sweep the artifact for the claim you just retracted.** Accepting a
+  finding and editing one place leaves the same claim standing in that section's heading, in a
+  summary table, or in a downstream reference — and the next round blocks on the copy. In the
+  one convergence run measured, 4 of 31 objections (13%) were exactly this, and they recurred
+  even after the pattern was known. `grep` the retracted phrase across the whole artifact and
+  fix every hit before re-running the gate. This costs seconds and needs no model.
 - `BLOCK:` → reflect findings, revise the plan, re-review. **First test the line for the `INFRA_ERROR` token** — the gate emits infra failures as `BLOCK: INFRA_ERROR (…)` (exit 1, same as a content block), so treat those via the `INFRA_ERROR` rule below, not as a content revision (else you revise the plan forever).
 - Escalation is automatic in the gate: from cumulative BLOCK `escalate_from` (6), a valid `TEAM_REVIEW` (even) / `TEAM_CARRY` (odd) marker must be recorded in the gate log (roster ≥2 distinct, `TEAM_REVIEW` cites fresh `outputs=`). **Do not skip the team step or substitute planner-solo to save cost — the cost/continue call is the user's, not the model's.** Record the marker with `review_gate.py prepare-marker <artifact>` and hand the request file to the human; `record-marker` is the only command that writes it and it refuses without a terminal and a token. `.halt` (repeated BLOCK / max_block / repeated escalation stalls) → stop and report; no retry until the user clears it.
 - `INFRA_ERROR` (tooling down/timeout/empty/invalid) → **attended**: the stage MAY advance, but MERGE/PUSH is refused until a clean `ALLOW:` clears the infra flag; **unattended**: pause + notify. (Matches `scripts/review_gate.py` + `.sdp/gates.yaml infra_error_policy`; see SDP.md 3-state rules.) Do not treat it as a plain "cannot proceed".
