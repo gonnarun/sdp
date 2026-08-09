@@ -43,4 +43,38 @@ else
   printf '%s\n' "$dout" | sed 's/^/       /'
 fi
 
+
+# --- anchor provenance + staleness reporting -------------------------------
+# .sdp_runtime.env is written once per command entry and is NEVER refreshed by a
+# plugin reinstall. Old plugin-cache versions stay on disk while live sessions
+# hold them, so a stale SDP_ROOT still resolves and a different engine runs
+# silently. doctor reports that; it must NOT enforce it, or every project whose
+# last command entry predates the current install would go UNHEALTHY at once.
+AP="$(mktemp -d -t sdp_anchor.XXXXXX)"
+rt="$(CLAUDE_PROJECT_DIR="$AP" bash "$SDP_ROOT/scripts/sdp-anchor.sh" 2>/dev/null)"
+{ grep -q "^SDP_VERSION=" "$rt" && grep -q "^ANCHORED_AT=" "$rt"; } \
+  && ok "anchor records SDP_VERSION + ANCHORED_AT (provenance for staleness checks)" \
+  || bad "anchor provenance fields missing"
+
+aout="$(python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$AP" doctor 2>&1)"
+printf '%s' "$aout" | grep -q "anchor: current" \
+  && ok "doctor: freshly anchored project reports anchor current" \
+  || { bad "doctor anchor current"; printf '%s\n' "$aout" | grep anchor: | sed 's/^/       /'; }
+
+# Point the record at a directory that exists but is not this engine.
+sed -i.bak "s|^SDP_ROOT=.*|SDP_ROOT='/tmp'|" "$rt" && rm -f "$rt.bak"
+sout="$(python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$AP" doctor 2>&1)"; src=$?
+aline="$(printf '%s' "$sout" | grep 'anchor:')"
+{ printf '%s' "$aline" | grep -q "STALE" && printf '%s' "$aline" | grep -q "DIFFERENT engine"; } \
+  && ok "doctor: stale anchor pointing at an existing other dir is reported as STALE" \
+  || bad "doctor stale-anchor detection: $aline"
+
+# The staleness must not move the health verdict -- compare against the fresh run.
+fresh_health="$(printf '%s' "$aout" | grep -o 'health: [A-Z]*')"
+stale_health="$(printf '%s' "$sout" | grep -o 'health: [A-Z]*')"
+[ "$fresh_health" = "$stale_health" ] \
+  && ok "doctor: a stale anchor is reported but does NOT change the health verdict" \
+  || bad "stale anchor changed health ($fresh_health -> $stale_health, rc=$src)"
+rm -rf "$AP"
+
 echo "-------- $P passed, $F failed --------"; [ "$F" -eq 0 ]
