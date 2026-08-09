@@ -37,10 +37,19 @@ worktree:
 
 # dispatch adapters (REQ-C-03 / REQ-C-07). batch_engine/worktree_mode default to the
 # classifier-safe paths; the tmux/auto paths use scripts/run_segment_tmux.sh when tmux+claude
-# are present and the codex auto-mode classifier does not block, else fall back.
+# are present and the codex auto-mode classifier does not block, else fall back to manual.
+# The orca path (opt-in only) uses scripts/orca_dispatch.sh when its own Orca-CLI capability
+# probe passes; see the worktree_mode comment below for its fallback contract and unknowns.
 dispatch:
   batch_engine: agent_tool         # agent_tool (default) | tmux_long_lived
-  worktree_mode: manual            # manual (default) | auto
+  worktree_mode: manual            # manual (default) | auto | orca
+                                   # orca: opt-in, never default. Backed by scripts/orca_dispatch.sh;
+                                   # see docs/KNOWN_GAPS.md NC-26 for what is unexercised.
+                                   # Any probe failure falls back to
+                                   # manual ONLY — never to auto (auto's own bypassPermissions grant
+                                   # must not be silently invoked by choosing orca). Residual unknowns
+                                   # (design §5): --timeout-ms semantics, the permission boundary
+                                   # under a privileged action, and concurrency limits.
   session_prefix: sdp-seg          # tmux session-name prefix (de-domained)
   default_timeout: 14400           # run_segment_tmux.sh MODE timeout (seconds) — time hard cap (NFR-05)
   rules_include: ""                # optional project rules file(s) injected into the session prompt
