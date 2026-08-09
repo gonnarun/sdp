@@ -353,6 +353,47 @@ printf 'something else entirely\n' > "$WT/STATUS.md"
 rc="$(status_run >/dev/null 2>&1; echo $?)"
 [ "$rc" = 9 ] && ok "status: STATUS.md content unrecognized -> 9" || bad "unrecognized verdict (rc=$rc, want 9)"
 
+# The verdict lives in the worktree, and the worktree is disposable: removing
+# it takes STATUS.md with it. RESULT.json is written into SEGMENT_DIR (under
+# the main repo's artifact root) so the outcome survives ordinary cleanup.
+printf 'FAIL_12X\n' > "$WT/STATUS.md"
+rm -f "$SEG_ST/RESULT.json"
+status_run >/dev/null 2>&1 || true
+if [ -f "$SEG_ST/RESULT.json" ]; then
+  v="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["verdict"])' "$SEG_ST/RESULT.json" 2>/dev/null)"
+  [ "$v" = "FAIL_12X" ] && ok "status: verdict persisted to SEGMENT_DIR/RESULT.json (survives worktree removal)" \
+    || bad "RESULT.json verdict was '$v', want FAIL_12X"
+else
+  bad "RESULT.json not written"
+fi
+
+# Deleting the worktree entirely must not erase the record, and must not turn a
+# recorded outcome into a different exit code.
+rm -rf "$WT"
+[ -f "$SEG_ST/RESULT.json" ] && ok "status: RESULT.json outlives the worktree it describes" || bad "RESULT.json vanished with the worktree"
+mkdir -p "$WT"
+
+# A record that cannot be written is loud, but must NOT change the verdict --
+# letting a failed *write* mark a task failed is the confusion that produced
+# the presence-vs-content defect in the first place.
+printf 'SUCCESS\n' > "$WT/STATUS.md"
+rm -f "$SEG_ST/RESULT.json"; mkdir -p "$SEG_ST/RESULT.json"   # a directory blocks the write
+out="$(status_run 2>&1)"; rc=$?
+rmdir "$SEG_ST/RESULT.json" 2>/dev/null || rm -rf "$SEG_ST/RESULT.json"
+{ [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF "NOT durably recorded"; } \
+  && ok "status: RESULT.json blocked by a non-regular file warns, verdict exit code unchanged" \
+  || bad "blocked RESULT.json changed the outcome (rc=$rc): $out"
+
+# Same property via the other failure route: the write itself failing, rather
+# than being refused up front. A read-only SEGMENT_DIR reaches the mv branch.
+rm -f "$SEG_ST/RESULT.json"
+chmod a-w "$SEG_ST"
+out="$(status_run 2>&1)"; rc=$?
+chmod u+w "$SEG_ST"
+{ [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF "NOT durably recorded"; } \
+  && ok "status: unwritable SEGMENT_DIR warns loudly but leaves the verdict exit code alone" \
+  || bad "failed RESULT.json write changed the outcome (rc=$rc): $out"
+
 rm -f "$WT/STATUS.md"
 rc="$(status_run >/dev/null 2>&1; echo $?)"
 [ "$rc" = 125 ] && ok "status: settled+succeeded, no STATUS.md -> 125" || bad "status succeeded-no-STATUS.md (rc=$rc)"
