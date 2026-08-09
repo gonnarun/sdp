@@ -15,6 +15,15 @@ _src="${BASH_SOURCE[0]:-$0}"
 SDP_SCRIPTS="$(cd "$(dirname "$_src")" && pwd)"
 SDP_ROOT="$(cd "$SDP_SCRIPTS/.." && pwd)"
 SDP_CORE="$SDP_ROOT/core"
+# Version of the tree this anchor belongs to, read from the manifest rather than
+# the directory name: a plugin-cache install is named by version, a checkout is
+# not. Absent/unreadable is not fatal -- it becomes "unknown" and doctor reports
+# it as such instead of the anchor refusing to run.
+SDP_VERSION="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("version") or "unknown")
+except Exception:
+    print("unknown")' "$SDP_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo unknown)"
 
 # shellcheck source=/dev/null
 . "$SDP_SCRIPTS/lib/sdp-config.sh"
@@ -157,6 +166,15 @@ _shq() { local s=$1; s=${s//\'/\'\\\'\'}; printf "'%s'" "$s"; }
   printf 'OUTPUT_LOCALE_MODE=%s\n' "$(_shq "$OUTPUT_LOCALE_MODE")"
   printf 'DEFAULTS=%s\n'           "$(_shq "$DEFAULTS")"
   printf 'GATES=%s\n'              "$(_shq "$GATES")"
+  # Provenance. This file is written once per command entry and is NEVER
+  # refreshed by a plugin reinstall, so between runs it can name an engine that
+  # is no longer the installed one. When old plugin-cache versions are still on
+  # disk -- they are, because live sessions hold them -- a stale SDP_ROOT still
+  # resolves, and the stale engine runs silently. Recording which version wrote
+  # this file, and when, is what lets `review_gate.py doctor` say so out loud
+  # (a missing directory fails noisily; an old one that still exists does not).
+  printf 'SDP_VERSION=%s\n'        "$(_shq "$SDP_VERSION")"
+  printf 'ANCHORED_AT=%s\n'        "$(_shq "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
 } > "$RUNTIME_ENV"
 
 printf '%s\n' "$RUNTIME_ENV"

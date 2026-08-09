@@ -2320,6 +2320,81 @@ def _doctor_gate_state(root: Path, lines: list[str]) -> bool:
     return healthy
 
 
+def _doctor_anchor(root: Path, lines: list[str]) -> None:
+    """Report whether the project's .sdp_runtime.env still names THIS engine.
+
+    Read-only, and deliberately NOT part of the health verdict. The file is
+    written once per command entry and never refreshed by a plugin reinstall,
+    so between runs it can name an older plugin-cache version -- which, because
+    old versions stay on disk while live sessions hold them, still resolves and
+    runs silently. A missing directory fails noisily on its own; an old one
+    that still exists is the case nothing else catches, so it is surfaced here.
+
+    Non-fatal on purpose: making a stale anchor UNHEALTHY would fail every
+    project whose last command entry predates the current install, all at once,
+    and the repair (re-run sdp-anchor.sh) is the same either way. Visibility is
+    the goal, not enforcement.
+    """
+    try:
+        base = _audit_base(root)
+    except Exception:
+        base = root / ".private" / "sdp-artifacts"
+    env_path = base / ".sdp_runtime.env"
+    if not env_path.is_file():
+        lines.append("  anchor: none (no .sdp_runtime.env; run scripts/sdp-anchor.sh)")
+        return
+    vals: dict[str, str] = {}
+    try:
+        for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, sep, val = raw.partition("=")
+            if sep and key.isidentifier():
+                vals[key] = val.strip().strip("'")
+    except OSError as exc:
+        lines.append(f"  anchor: UNREADABLE ({exc})")
+        return
+
+    recorded_root = vals.get("SDP_ROOT", "")
+    recorded_ver = vals.get("SDP_VERSION", "")
+    anchored_at = vals.get("ANCHORED_AT", "")
+    running_root = str(Path(__file__).resolve().parent.parent)
+
+    if not recorded_root:
+        lines.append(f"  anchor: MALFORMED (no SDP_ROOT in {env_path})")
+        return
+    if recorded_root == running_root:
+        detail = f"{recorded_ver or 'version unrecorded'}"
+        if anchored_at:
+            detail += f", anchored {anchored_at}"
+        lines.append(f"  anchor: current ({detail})")
+        return
+
+    running_ver = "unknown"
+    try:
+        manifest = Path(running_root) / ".claude-plugin" / "plugin.json"
+        running_ver = json.loads(manifest.read_text(encoding="utf-8")).get("version") or "unknown"
+    except Exception:
+        pass
+
+    exists = Path(recorded_root).is_dir()
+    lines.append(
+        f"  anchor: STALE -- {env_path} names {recorded_root}"
+        f" (v{recorded_ver or 'unrecorded'}"
+        f"{f', anchored {anchored_at}' if anchored_at else ''}); "
+        f"this engine is {running_root} (v{running_ver}). "
+        + (
+            # Deliberately does not claim which is older: the recorded engine may be a
+            # newer install than a checkout being run directly. The hazard is that the
+            # two differ at all while the recorded one still resolves.
+            "That directory still exists, so anything that follows the recorded path "
+            "silently runs a DIFFERENT engine than this one. Re-run "
+            "scripts/sdp-anchor.sh before relying on it."
+            if exists
+            else "That directory is gone, so anything that follows the recorded path "
+            "will fail. Re-run scripts/sdp-anchor.sh."
+        )
+    )
+
+
 def _doctor(cwd: str | None = None) -> tuple[str, bool, bool]:
     root = _workspace_root(cwd)
     lines = ["SDP review-gate doctor"]
@@ -2363,6 +2438,7 @@ def _doctor(cwd: str | None = None) -> tuple[str, bool, bool]:
         "  mode: directional -- Claude Code reviews with codex, codex reviews with "
         "claude; agy fallback on infra; content BLOCK does not fallback"
     )
+    _doctor_anchor(root, lines)
     gate_ok = _doctor_gate_state(root, lines)
     overall = healthy and gate_ok
     # Two axes, distinguishable (§4.5 Q13): an agent asking a wedged gate must not
