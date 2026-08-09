@@ -98,14 +98,17 @@ if sv != "MISSING":
 print(json.dumps(d))
 ' "$1"
 }
-repo_list_json() { # matching_path count_matches
+repo_list_json() { # matching_path count_matches [gitUsername]
+  # gitUsername is what the adapter uses to predict the branch Orca will create
+  # ("<gitUsername>/<name>"), so the stub carries it like the real response does.
   python3 -c '
 import json, sys
 path, n = sys.argv[1], int(sys.argv[2])
-repos = [{"id": f"repo-{i}", "path": path} for i in range(n)]
-repos.append({"id": "repo-other", "path": "/nonexistent/unrelated/path"})
+user = sys.argv[3] if len(sys.argv) > 3 else "testuser"
+repos = [{"id": f"repo-{i}", "path": path, "gitUsername": user} for i in range(n)]
+repos.append({"id": "repo-other", "path": "/nonexistent/unrelated/path", "gitUsername": user})
 print(json.dumps({"ok": True, "result": {"repos": repos}}))
-' "$1" "$2"
+' "$1" "$2" "${3:-testuser}"
 }
 worker_show_state_json() { # state stage
   python3 -c '
@@ -190,6 +193,13 @@ out="$(SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" bash "$ADAPTER" "$BATCH" "$TMP/s
 # ==============================================================================
 echo "== strict probe: catch-all -> 5 =="
 PROJ="$TMP/proj"; mkdir -p "$PROJ"
+# The adapter dispatches git worktrees, so it resolves and pins its base with
+# `git rev-parse` against CLAUDE_PROJECT_DIR. A bare directory is not a
+# realistic stand-in: make it a real repository with one commit.
+git -C "$PROJ" init -q 2>/dev/null
+printf 'canary\n' > "$PROJ/README.md"
+git -C "$PROJ" add -A >/dev/null 2>&1
+git -C "$PROJ" -c user.email=t@example.com -c user.name=t commit -qm init >/dev/null 2>&1
 WS="$(canon "$PROJ")"
 SEG_PROBE="$TMP/seg-probe"   # probe mode never touches SEGMENT_DIR; need not exist
 
@@ -319,8 +329,29 @@ write_state "$SEG_ST" "task_st" "ctx_st_1" "$WT" "repo1::$WT" "9999999999"
 reset_resp; set_resp worker_show "$(cat "$FIXDIR/worker-show-settled.json")" 0
 printf 'SUCCESS\n' > "$WT/STATUS.md"
 out="$(status_run 2>&1)"; rc=$?
-{ [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF "STATUS.md present"; } \
-  && ok "status: settled+succeeded + STATUS.md present -> 0" || bad "status succeeded+STATUS.md (rc=$rc): $out"
+{ [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF "settled: SUCCESS"; } \
+  && ok "status: settled+succeeded + STATUS.md SUCCESS -> 0" || bad "status succeeded+SUCCESS (rc=$rc): $out"
+
+# N3 (REQ-034): the verdict comes from STATUS.md's CONTENT, never its presence.
+# Orca reports `state: succeeded` for a worker whose SDP verdict is FAIL_12X --
+# measured live on 2026-08-09 -- so a presence-only check reports every failed
+# segment as a success. These four cases are the regression for that defect;
+# the codes match run_segment_tmux.sh's so both adapters read alike.
+printf 'FAIL_12X\n' > "$WT/STATUS.md"
+rc="$(status_run >/dev/null 2>&1; echo $?)"
+[ "$rc" = 10 ] && ok "status: settled+succeeded but STATUS.md=FAIL_12X -> 10 (NOT 0)" || bad "FAIL_12X verdict (rc=$rc, want 10)"
+
+printf 'HALT_BLOCK\n' > "$WT/STATUS.md"
+rc="$(status_run >/dev/null 2>&1; echo $?)"
+[ "$rc" = 11 ] && ok "status: STATUS.md=HALT_BLOCK -> 11" || bad "HALT_BLOCK verdict (rc=$rc, want 11)"
+
+printf 'PAUSE_USER_INPUT_REQUIRED\n' > "$WT/STATUS.md"
+rc="$(status_run >/dev/null 2>&1; echo $?)"
+[ "$rc" = 12 ] && ok "status: STATUS.md=PAUSE_USER_INPUT_REQUIRED -> 12" || bad "PAUSE verdict (rc=$rc, want 12)"
+
+printf 'something else entirely\n' > "$WT/STATUS.md"
+rc="$(status_run >/dev/null 2>&1; echo $?)"
+[ "$rc" = 9 ] && ok "status: STATUS.md content unrecognized -> 9" || bad "unrecognized verdict (rc=$rc, want 9)"
 
 rm -f "$WT/STATUS.md"
 rc="$(status_run >/dev/null 2>&1; echo $?)"
@@ -488,6 +519,13 @@ set_resp run_create "$(cat "$FIXDIR/run-create.json")" 0
 set_resp task_create "$(cat "$FIXDIR/task-create-ok.json")" 0
 set_resp worker_start "$(cat "$FIXDIR/worker-start.json")" 0
 
+# The base is PINNED: SDP_ORCA_BASE_BRANCH names a ref, and the adapter passes
+# the SHA that ref resolved to, never the ref itself. Passing the name would
+# leave a window in which it advances before Orca resolves it, so the recorded
+# base would not be the base the worktree actually got -- and an ancestry check
+# would still pass.
+git -C "$PROJ" branch -f develop HEAD >/dev/null 2>&1
+DEV_SHA="$(git -C "$PROJ" rev-parse develop)"
 SEG_ARGV="$TMP/seg-argv"; mkdir -p "$SEG_ARGV"; printf 'scope\n' > "$SEG_ARGV/INPUT.md"
 base=$(log_lines)
 SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" SDP_ORCA_AGENT="codex" \
@@ -497,21 +535,40 @@ argv_line="$(log_since "$base" | grep "orchestration worker-start" | head -1)"
 { printf '%s' "$argv_line" | grep -q -- "--agent codex" \
     && printf '%s' "$argv_line" | grep -q -- "--model gpt-hypothetical" \
     && printf '%s' "$argv_line" | grep -q -- "--effort high" \
-    && printf '%s' "$argv_line" | grep -q -- "--base-branch develop"; } \
-  && ok "worker-start argv: SDP_ORCA_AGENT/MODEL/EFFORT/BASE_BRANCH all reach the CLI" \
+    && printf '%s' "$argv_line" | grep -q -- "--name seg-argv" \
+    && printf '%s' "$argv_line" | grep -q -- "--base-branch $DEV_SHA" \
+    && ! printf '%s' "$argv_line" | grep -q -- "--base-branch develop"; } \
+  && ok "worker-start argv: AGENT/MODEL/EFFORT reach the CLI, --name is passed, base is a pinned SHA not a ref name" \
   || bad "worker-start argv missing expected flags: $argv_line"
 
 SEG_ARGV2="$TMP/seg-argv2"; mkdir -p "$SEG_ARGV2"; printf 'scope\n' > "$SEG_ARGV2/INPUT.md"
 base=$(log_lines)
 SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" SDP_ORCA_EFFORT="high" \
   bash "$ADAPTER" "$BATCH" "$SEG_ARGV2" init 300 >/dev/null 2>&1   # SDP_ORCA_MODEL left unset
+HEAD_SHA="$(git -C "$PROJ" rev-parse HEAD)"
 argv_line2="$(log_since "$base" | grep "orchestration worker-start" | head -1)"
 { printf '%s' "$argv_line2" | grep -q -- "--agent claude" \
     && ! printf '%s' "$argv_line2" | grep -q -- "--model" \
     && ! printf '%s' "$argv_line2" | grep -q -- "--effort" \
-    && ! printf '%s' "$argv_line2" | grep -q -- "--base-branch"; } \
-  && ok "worker-start argv: --effort omitted when SDP_ORCA_MODEL is unset (gated correctly, default agent=claude)" \
-  || bad "worker-start argv: --effort leaked without a model, or default agent wrong: $argv_line2"
+    && printf '%s' "$argv_line2" | grep -q -- "--base-branch $HEAD_SHA"; } \
+  && ok "worker-start argv: --effort omitted when SDP_ORCA_MODEL is unset; base still pinned (defaults to HEAD's SHA)" \
+  || bad "worker-start argv: --effort leaked without a model, or base not pinned: $argv_line2"
+
+# The segment basename becomes the worktree name AND the branch, so it is
+# validated rather than silently rewritten -- a mangled name would still
+# dispatch, under an identity the caller does not expect.
+SEG_BAD="$TMP/seg with spaces"; mkdir -p "$SEG_BAD"; printf 'scope\n' > "$SEG_BAD/INPUT.md"
+rc="$(SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" bash "$ADAPTER" "$BATCH" "$SEG_BAD" init 300 >/dev/null 2>&1; echo $?)"
+[ "$rc" = 3 ] && ok "init: segment name outside [A-Za-z0-9._-] refused -> 3 (never silently rewritten)" \
+  || bad "bad segment name (rc=$rc, want 3)"
+
+# Teardown preserves a branch that carries commits (measured), so re-running a
+# segment of the same name would collide on identity. Refuse; never adopt.
+SEG_COLL="$TMP/seg-collide"; mkdir -p "$SEG_COLL"; printf 'scope\n' > "$SEG_COLL/INPUT.md"
+git -C "$PROJ" branch -f "testuser/seg-collide" HEAD >/dev/null 2>&1
+rc="$(SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" bash "$ADAPTER" "$BATCH" "$SEG_COLL" init 300 >/dev/null 2>&1; echo $?)"
+[ "$rc" = 6 ] && ok "init: refuses when the branch it would create already exists -> 6" \
+  || bad "branch collision (rc=$rc, want 6)"
 
 # ==============================================================================
 # 9. orchestration reset: never called, anywhere in this suite
