@@ -1,0 +1,17 @@
+{
+  "id": "6eb5c0ed-9aaa-48a0-b1b6-77fea5853df1",
+  "ok": true,
+  "result": {
+    "dispatchId": "ctx_be002dcfc6c8",
+    "state": "succeeded",
+    "alreadySettled": true,
+    "processAction": "none",
+    "mutation": {
+      "requestId": "b0def9fe-43e2-4dbb-bd53-47f15e0d971f",
+      "replayed": false
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

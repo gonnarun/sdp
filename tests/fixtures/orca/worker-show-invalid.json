@@ -1,0 +1,11 @@
+{
+  "id": "e5b5bde9-fc2c-4076-ae55-7c1ad7d6336f",
+  "ok": false,
+  "error": {
+    "code": "dispatch_not_found",
+    "message": "Worker Dispatch ctx_doesnotexist99 was not found."
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "id": "f93c0dbb-0540-4e21-adf9-8394c39b776b",
+  "ok": true,
+  "result": {
+    "runId": "run_6ad8b0b568b2",
+    "taskId": "task_a96c3d9ffaad",
+    "dispatchId": "ctx_be002dcfc6c8",
+    "state": "ready",
+    "stage": "input_accepted",
+    "setup": {
+      "requested": "skip",
+      "effective": "skip",
+      "source": "explicit_request",
+      "hookFound": false,
+      "startupPolicy": "start-immediately",
+      "state": "not_configured"
+    },
+    "launch": {
+      "requested": {
+        "agent": "claude",
+        "model": null,
+        "effort": null
+      },
+      "effective": {
+        "agent": "claude",
+        "model": null,
+        "effort": null
+      }
+    },
+    "timeoutMs": 240000,
+    "effects": [
+      {
+        "kind": "worktree",
+        "action": "created_child",
+        "id": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe"
+      },
+      {
+        "kind": "terminal",
+        "role": "agent",
+        "action": "reused_agent_terminal",
+        "id": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+        "tabId": "741f5845-0b81-4181-b1a4-ba5f522f52ba",
+        "leafId": "91243ff5-f56b-4ce1-a355-324a808eda89"
+      },
+      {
+        "kind": "setup",
+        "action": "skip",
+        "requested": "skip",
+        "effective": "skip",
+        "source": "explicit_request",
+        "hookFound": false,
+        "startupPolicy": "start-immediately",
+        "state": "not_configured"
+      },
+      {
+        "kind": "dispatch_input",
+        "role": "agent",
+        "id": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+        "state": "accepted"
+      }
+    ],
+    "residualResources": [],
+    "mutation": {
+      "requestId": "ef3feed9-5c80-449e-a2b9-7417ed6d00cf",
+      "replayed": false
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}
