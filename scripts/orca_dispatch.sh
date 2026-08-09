@@ -22,9 +22,12 @@
 # init  : run-create -> task-create -> worker-start, fixed order (§6). Writes
 #         SEGMENT_DIR/.orca_dispatch.json and RETURNS — it does not wait.
 #         Refuses if that state file already exists (never re-dispatches).
-# status: worker-show against the recorded dispatch id, reporting only whether
-#         the WORKER settled. STATUS.md at the created worktree's root remains
-#         the SDP verdict (§3.3) — this mode never reads or judges its content.
+# status: worker-show against the recorded dispatch id, then the SDP verdict
+#         from the CONTENT of STATUS.md at the created worktree's root (§3.3).
+#         On any settled outcome it also writes SEGMENT_DIR/RESULT.json — the
+#         verdict plus result_sha/base_sha/branch/ancestry/dirty — because the
+#         worktree is disposable and `orca worktree rm` would otherwise take
+#         the only record of the outcome with it.
 # stop  : explicit operator action only — never deadline-triggered (§3.1b).
 #         Identity-binds via worker-show (dispatch.id, dispatch.task_id, both
 #         halves of worker.worktree_id) before calling worker-stop; any
@@ -521,38 +524,87 @@ do_init() {
   echo "dispatched: task=$task_id dispatch=$dispatch_id worktree=$worktree_path branch=${branch:-<unconfirmed>} base=$base_sha"
 }
 
-# _report_result WORKTREE_PATH BASE_SHA BRANCH
-# Prints what an integrator needs and cannot get from a verdict word: the exact
-# commit to merge, whether it descends from the base this dispatch pinned, the
-# branch actually checked out, and anything left dirty. INFORMATIONAL ONLY --
-# it never changes the exit code. The verdict answers "did the workflow pass";
-# this answers "what exactly would I be merging", and conflating the two would
-# make a reporting gap look like a task failure. Integrate result_sha, never a
-# branch name: a branch can move between this call and the merge.
+# _report_result VERDICT WORKTREE_PATH BASE_SHA BRANCH TASK_ID DISPATCH_ID
+# Prints what an integrator needs and cannot get from a verdict word -- the
+# exact commit to merge, whether it descends from the base this dispatch
+# pinned, the branch actually checked out, anything left dirty -- and PERSISTS
+# the same facts to ${SEGMENT_DIR}/RESULT.json.
 #
-# The expected steady state is a dirty set of exactly `?? STATUS.md`: the
-# handover is inlined into the task spec, so no INPUT.md exists in the
-# worktree, and STATUS.md is deliberately never committed.
+# Persisting matters because the verdict lives in the worktree, and the
+# worktree is disposable: `orca worktree rm` deletes it, taking STATUS.md with
+# it, so after ordinary cleanup nothing would record whether the segment
+# passed. SEGMENT_DIR sits under the main repo's artifact root and survives.
+# (The same class of loss was hit in production elsewhere when a completion
+# record's real location drifted from its documented one.)
+#
+# INFORMATIONAL ONLY: neither the printing nor the persisting may change the
+# exit code. The verdict answers "did the workflow pass"; this answers "what
+# exactly would I be merging", and letting a failed *write* mark a task failed
+# is the same confusion that produced the defect this file's header records.
+# A write failure is therefore loud on stderr and nothing more.
+#
+# Integrate result_sha, never a branch name: a branch can move between this
+# call and the merge.
 _report_result() {
-  local wt="$1" base="$2" branch="$3"
-  git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || { echo "  result: <$wt is not a git worktree>"; return 0; }
-  local head cur dirty
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '<unknown>')"
-  cur="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo '<detached>')"
-  echo "  result_sha : $head"
-  echo "  branch     : $cur${branch:+ (recorded: $branch)}"
-  [ -n "$branch" ] && [ "$cur" != "$branch" ] && echo "  WARNING    : checked-out branch differs from the one recorded at dispatch"
-  if [ -n "$base" ]; then
-    if [ "$head" = "$base" ]; then
-      echo "  ancestry   : NO NEW COMMIT — HEAD is still the pinned base $base"
-    elif git -C "$wt" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
-      echo "  ancestry   : ok — descends from pinned base $base"
-    else
-      echo "  ancestry   : WARNING — does NOT descend from the pinned base $base"
+  local verdict="$1" wt="$2" base="$3" branch="$4" task_id="$5" dispatch_id="$6"
+  local head="" cur="" dirty="" ancestry="unknown"
+
+  if git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+    head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '')"
+    cur="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo '')"
+    dirty="$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null | tr '\n' ';')"
+    if [ -n "$base" ] && [ -n "$head" ]; then
+      if [ "$head" = "$base" ]; then ancestry="no_new_commit"
+      elif git -C "$wt" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then ancestry="ok"
+      else ancestry="not_descended"; fi
     fi
+    echo "  result_sha : ${head:-<unknown>}"
+    echo "  branch     : ${cur:-<detached>}${branch:+ (recorded: $branch)}"
+    [ -n "$branch" ] && [ -n "$cur" ] && [ "$cur" != "$branch" ] && echo "  WARNING    : checked-out branch differs from the one recorded at dispatch"
+    case "$ancestry" in
+      no_new_commit) echo "  ancestry   : NO NEW COMMIT — HEAD is still the pinned base $base" ;;
+      ok)            echo "  ancestry   : ok — descends from pinned base $base" ;;
+      not_descended) echo "  ancestry   : WARNING — does NOT descend from the pinned base $base" ;;
+    esac
+    echo "  dirty      : ${dirty:-<clean>}"
+  else
+    echo "  result     : <$wt is not a git worktree — worktree already removed?>"
   fi
-  dirty="$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null | tr '\n' ';')"
-  echo "  dirty      : ${dirty:-<clean>}"
+
+  # `mv -f file dir` moves the file INTO dir and reports success, so an
+  # existing non-regular RESULT.json would leave the record unwritten while
+  # this function claimed to have written it. Refuse up front instead.
+  local out="${SEGMENT_DIR}/RESULT.json" tmp="${SEGMENT_DIR}/RESULT.json.tmp"
+  if [ -e "$out" ] && [ ! -f "$out" ]; then
+    echo "WARNING: $out exists and is not a regular file — refusing to write it; the verdict is reported but NOT durably recorded" >&2
+    return 0
+  fi
+  if python3 -c '
+import json, sys, datetime
+verdict, wt, base, branch_rec, branch_obs, head, ancestry, dirty, task_id, dispatch_id, out = sys.argv[1:12]
+rec = {
+    "v": 1,
+    "verdict": verdict,
+    "task_id": task_id or None,
+    "dispatch_id": dispatch_id or None,
+    "worktree_path": wt or None,
+    "base_sha": base or None,
+    "result_sha": head or None,
+    "branch_recorded": branch_rec or None,
+    "branch_observed": branch_obs or None,
+    "ancestry": ancestry,
+    "dirty": [x for x in dirty.split(";") if x],
+    "observed_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+with open(out, "w") as fh:
+    json.dump(rec, fh, indent=2)
+    fh.write("\n")
+' "$verdict" "$wt" "$base" "$branch" "$cur" "$head" "$ancestry" "$dirty" "$task_id" "$dispatch_id" "$tmp" 2>/dev/null && mv -f "$tmp" "$out" 2>/dev/null; then
+    echo "  recorded   : $out"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    echo "WARNING: could not write $out — the verdict is reported but NOT durably recorded; it will be lost when the worktree is removed" >&2
+  fi
 }
 
 # =============================================================================
@@ -612,25 +664,33 @@ do_status() {
         # with the same exit codes so a caller can treat both adapters alike.
         [ -s "${worktree_path}/STATUS.md" ] || {
           echo "ERROR: worker settled (succeeded) but no STATUS.md at ${worktree_path}" >&2
+          _report_result "NO_STATUS_MD" "$worktree_path" "$base_sha" "$branch" "$task_id" "$dispatch_id"
           exit 125; }
         [ -f "${worktree_path}/STATUS.md" ] || {
           echo "ERROR: ${worktree_path}/STATUS.md is not a regular file" >&2
+          _report_result "STATUS_NOT_REGULAR_FILE" "$worktree_path" "$base_sha" "$branch" "$task_id" "$dispatch_id"
           exit 9; }
         local verdict
         verdict="$(head -n1 "${worktree_path}/STATUS.md" 2>/dev/null | tr -d '[:space:]')"
-        _report_result "$worktree_path" "$base_sha" "$branch"
+        case "$verdict" in
+          SUCCESS|FAIL_12X|HALT_BLOCK|PAUSE_USER_INPUT_REQUIRED) : ;;
+          *) verdict="UNRECOGNIZED:${verdict}" ;;
+        esac
+        _report_result "$verdict" "$worktree_path" "$base_sha" "$branch" "$task_id" "$dispatch_id"
         case "$verdict" in
           SUCCESS)                   echo "settled: SUCCESS"; exit 0 ;;
           FAIL_12X)                  echo "settled: FAIL_12X" >&2;  exit 10 ;;
           HALT_BLOCK)                echo "settled: HALT_BLOCK" >&2; exit 11 ;;
           PAUSE_USER_INPUT_REQUIRED) echo "settled: PAUSE_USER_INPUT_REQUIRED" >&2; exit 12 ;;
-          *) echo "ERROR: STATUS.md content unrecognized: '${verdict}'" >&2; exit 9 ;;
+          *) echo "ERROR: STATUS.md content unrecognized: '${verdict#UNRECOGNIZED:}'" >&2; exit 9 ;;
         esac ;;
       failed|stopped)
         echo "ERROR: worker settled state=$wstate" >&2
+        _report_result "WORKER_${wstate}" "$worktree_path" "$base_sha" "$branch" "$task_id" "$dispatch_id"
         exit 7 ;;
       *)
         echo "ERROR: worker settled with unrecognized state=$wstate — outcome_unknown; operator must choose worker-stop/worker-abandon" >&2
+        _report_result "OUTCOME_UNKNOWN" "$worktree_path" "$base_sha" "$branch" "$task_id" "$dispatch_id"
         exit 126 ;;
     esac
   fi
