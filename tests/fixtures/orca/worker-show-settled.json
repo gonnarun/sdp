@@ -1,0 +1,151 @@
+{
+  "id": "5b80a03e-88ef-4d16-b248-a76c44e2ea57",
+  "ok": true,
+  "result": {
+    "dispatch": {
+      "id": "ctx_be002dcfc6c8",
+      "task_id": "task_a96c3d9ffaad",
+      "assignee_handle": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+      "assignee_pane_key": "741f5845-0b81-4181-b1a4-ba5f522f52ba:91243ff5-f56b-4ce1-a355-324a808eda89",
+      "status": "completed",
+      "failure_count": 0,
+      "last_failure": null,
+      "dispatched_at": "2026-08-09 06:04:36",
+      "completed_at": "2026-08-09 06:04:50",
+      "created_at": "2026-08-09 06:04:36",
+      "last_heartbeat_at": null,
+      "run_id": "run_6ad8b0b568b2",
+      "capability_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "process_incarnation": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe@@3bf1de5a:09dc0202-d3f6-45e9-99bd-28eff5959cac",
+      "capability_revoked_at": "2026-08-09 06:04:50",
+      "contract_version": 1,
+      "launch_token_hash": "0000000000000000000000000000000000000000000000000000000000000002"
+    },
+    "worker": {
+      "dispatch_id": "ctx_be002dcfc6c8",
+      "runtime_epoch": "00000000-0000-4000-8000-000000000000",
+      "state": "succeeded",
+      "stage": "settled",
+      "worktree_id": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe",
+      "agent_terminal_handle": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+      "setup_state": "not_configured",
+      "effects": [
+        {
+          "kind": "worktree",
+          "action": "created_child",
+          "id": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe"
+        },
+        {
+          "kind": "terminal",
+          "role": "agent",
+          "action": "reused_agent_terminal",
+          "id": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+          "tabId": "741f5845-0b81-4181-b1a4-ba5f522f52ba",
+          "leafId": "91243ff5-f56b-4ce1-a355-324a808eda89"
+        },
+        {
+          "kind": "setup",
+          "action": "skip",
+          "requested": "skip",
+          "effective": "skip",
+          "source": "explicit_request",
+          "hookFound": false,
+          "startupPolicy": "start-immediately",
+          "state": "not_configured"
+        },
+        {
+          "kind": "dispatch_input",
+          "role": "agent",
+          "id": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+          "state": "accepted"
+        }
+      ],
+      "residual_resources": "[{\"kind\":\"worktree\",\"action\":\"created_child\",\"id\":\"fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe\"},{\"kind\":\"terminal\",\"role\":\"agent\",\"action\":\"reused_agent_terminal\",\"id\":\"term_36d437c7-15c4-4c87-94eb-9c316e8030bb\",\"tabId\":\"741f5845-0b81-4181-b1a4-ba5f522f52ba\",\"leafId\":\"91243ff5-f56b-4ce1-a355-324a808eda89\"}]",
+      "start_options": "{\"worktree\":\"new-child\",\"resolvedWorktreeId\":null,\"name\":\"sdp-orca-probe\",\"repo\":\"id:fafb5f5a-a0ab-4441-ab50-84c951abaed2\",\"baseBranch\":\"main\",\"terminal\":null,\"agent\":\"claude\",\"launch\":{\"requested\":{\"agent\":\"claude\",\"model\":null,\"effort\":null},\"effective\":{\"agent\":\"claude\",\"model\":null,\"effort\":null}},\"timeoutMs\":240000,\"setup\":\"skip\",\"setupSource\":\"explicit_request\"}",
+      "last_error": null,
+      "created_at": "2026-08-09 06:04:36",
+      "updated_at": "2026-08-09 06:04:50",
+      "residualResources": [
+        {
+          "kind": "worktree",
+          "action": "created_child",
+          "id": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe"
+        },
+        {
+          "kind": "terminal",
+          "role": "agent",
+          "action": "reused_agent_terminal",
+          "id": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+          "tabId": "741f5845-0b81-4181-b1a4-ba5f522f52ba",
+          "leafId": "91243ff5-f56b-4ce1-a355-324a808eda89"
+        }
+      ],
+      "startOptions": {
+        "worktree": "new-child",
+        "resolvedWorktreeId": null,
+        "name": "sdp-orca-probe",
+        "repo": "id:fafb5f5a-a0ab-4441-ab50-84c951abaed2",
+        "baseBranch": "main",
+        "terminal": null,
+        "agent": "claude",
+        "launch": {
+          "requested": {
+            "agent": "claude",
+            "model": null,
+            "effort": null
+          },
+          "effective": {
+            "agent": "claude",
+            "model": null,
+            "effort": null
+          }
+        },
+        "timeoutMs": 240000,
+        "setup": "skip",
+        "setupSource": "explicit_request"
+      }
+    },
+    "terminal": {
+      "handle": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+      "ptyId": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe@@3bf1de5a",
+      "incarnationId": "09dc0202-d3f6-45e9-99bd-28eff5959cac",
+      "orphaned": false,
+      "worktreeId": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe",
+      "worktreePath": "/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe",
+      "branch": "refs/heads/sdp-orca-probe",
+      "tabId": "741f5845-0b81-4181-b1a4-ba5f522f52ba",
+      "leafId": "91243ff5-f56b-4ce1-a355-324a808eda89",
+      "title": "✳ Write status probe file to repository root",
+      "connected": true,
+      "writable": true,
+      "lastOutputAt": 1786255613964,
+      "preview": "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\nOpus 5 (1M context) | ~/orca/workspaces/orca-probe-repo/sdp-orca-probe | sdp-orca-probe  ctx 96%\n⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents",
+      "paneRuntimeId": 1,
+      "rendererGraphEpoch": 1
+    },
+    "observation": {
+      "status": "running",
+      "exactWorker": true
+    },
+    "terminalResource": {
+      "id": "wtr_16e1d8e1ea30",
+      "ownershipState": "user_owned",
+      "releaseState": "retained",
+      "retainedReason": "user_takeover",
+      "terminalHandle": "term_36d437c7-15c4-4c87-94eb-9c316e8030bb",
+      "worktreeId": "fafb5f5a-a0ab-4441-ab50-84c951abaed2::/Users/dev/orca/workspaces/orca-probe-repo/sdp-orca-probe",
+      "originDispatchId": "ctx_be002dcfc6c8",
+      "ownerDispatchId": "ctx_be002dcfc6c8",
+      "releaseRequestedAt": null,
+      "releaseCompletedAt": null,
+      "releaseError": null,
+      "archive": {
+        "source": null,
+        "status": null
+      }
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

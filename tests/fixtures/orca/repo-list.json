@@ -1,0 +1,92 @@
+{
+    "id": "a69b3b04-9e22-4230-aacb-9989fefb17c5",
+    "ok": true,
+    "result": {
+        "repos": [
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "path": "/Users/dev/workspace/example-app",
+                "displayName": "example-app",
+                "badgeColor": "#737373",
+                "addedAt": 1784698747375,
+                "kind": "git",
+                "externalWorktreeVisibility": "hide",
+                "externalWorktreeVisibilityLegacy": false,
+                "gitUsername": "example-user",
+                "hookSettings": {
+                    "mode": "auto",
+                    "setupRunPolicy": "run-by-default",
+                    "setupAgentStartupPolicy": "start-immediately",
+                    "scripts": {
+                        "setup": "npm install",
+                        "archive": ""
+                    },
+                    "commandSourcePolicy": "local-only"
+                },
+                "projectGroupId": "22222222-2222-4222-8222-222222222222",
+                "projectGroupOrder": 0,
+                "repoIcon": {
+                    "type": "image",
+                    "src": "https://github.com/example-org.png?size=64",
+                    "source": "github",
+                    "label": "example-org/example-app"
+                },
+                "upstream": null,
+                "gitRemoteIdentity": {
+                    "canonicalKey": "github.com/example-org/example-app",
+                    "remoteName": "origin",
+                    "remoteUrl": "https://github.com/example-org/example-app.git"
+                },
+                "projectHostSetupMethod": "imported-existing-folder"
+            },
+            {
+                "id": "33333333-3333-4333-8333-333333333333",
+                "path": "/Users/dev/workspace/widget-service",
+                "displayName": "widget-service",
+                "badgeColor": "#737373",
+                "addedAt": 1784708579992,
+                "kind": "git",
+                "externalWorktreeVisibility": "hide",
+                "externalWorktreeVisibilityLegacy": false,
+                "gitUsername": "example-user",
+                "upstream": null,
+                "gitRemoteIdentity": {
+                    "canonicalKey": "github.com/example-org/widget-service",
+                    "remoteName": "origin",
+                    "remoteUrl": "https://github.com/example-org/widget-service.git"
+                },
+                "projectHostSetupMethod": "imported-existing-folder",
+                "hookSettings": {
+                    "mode": "auto",
+                    "setupRunPolicy": "run-by-default",
+                    "setupAgentStartupPolicy": "start-immediately",
+                    "scripts": {
+                        "setup": "",
+                        "archive": ""
+                    }
+                }
+            },
+            {
+                "id": "44444444-4444-4444-8444-444444444444",
+                "path": "/Users/dev/workspace/notes",
+                "displayName": "notes",
+                "badgeColor": "#737373",
+                "addedAt": 1784940280181,
+                "kind": "folder",
+                "gitUsername": "",
+                "hookSettings": {
+                    "mode": "auto",
+                    "setupRunPolicy": "run-by-default",
+                    "setupAgentStartupPolicy": "start-immediately",
+                    "scripts": {
+                        "setup": "",
+                        "archive": ""
+                    }
+                }
+            }
+        ]
+    },
+    "_meta": {
+        "runtimeId": "00000000-0000-4000-8000-000000000000"
+    }
+}

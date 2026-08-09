@@ -23,6 +23,7 @@ Use when the user asks for `worktree-dispatch`, parallel SDP worktrees, independ
 4. Dispatch mode:
    - `manual`: emit copy-pasteable handoff blocks and worktree setup commands.
    - `auto`: use `scripts/run_segment_tmux.sh` only when `dispatch.worktree_mode: auto` is configured and `tmux` + `claude` are available.
+   - `orca`: use `scripts/orca_dispatch.sh` only when `dispatch.worktree_mode: orca` is configured and its Orca-CLI capability probe passes; any probe failure falls back to `manual` only, never `auto`.
 5. After worktrees complete, integrate incrementally, then run deferred screen/API/data verification serially in main.
 
 ## Invariants

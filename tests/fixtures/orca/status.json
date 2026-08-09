@@ -1,0 +1,63 @@
+{
+  "id": "local-status",
+  "ok": true,
+  "result": {
+    "app": {
+      "running": true,
+      "pid": 80616,
+      "desktopWindowStatus": "available"
+    },
+    "runtime": {
+      "state": "ready",
+      "reachable": true,
+      "runtimeId": "00000000-0000-4000-8000-000000000000",
+      "appVersion": "1.4.176",
+      "remoteUpdateSupport": {
+        "installMode": "interactive",
+        "automatic": true,
+        "reason": "available"
+      },
+      "capabilities": [
+        "runtime.status.compat.v1",
+        "runtime.environments.v1",
+        "remote-runtime.shared-control.v1",
+        "orchestration.federation.v1",
+        "orchestration.federation-control-mail.v1",
+        "orchestration.worker-launch-preferences.v1",
+        "orchestration.contract.v1",
+        "browser.screencast.v1",
+        "terminal.binary-stream.v1",
+        "terminal.multiplex.v1",
+        "workspace-ports.v1",
+        "mobile.tasks.v1",
+        "project-host-setup.v1",
+        "task-source-context.v1",
+        "workspace-run-context.v1",
+        "worktree.linked-work-item-context.v1",
+        "folder-workspace.path-status.v1",
+        "linear.issue-attribute-filter.v1",
+        "aiVault.v1",
+        "terminal.query-reply-input.v1",
+        "terminal.paired-parking.v1",
+        "terminal.quick-commands.v1",
+        "worktree.create-idempotency.v1",
+        "terminal.create-idempotency.v2",
+        "session-tabs.close-intent.v1",
+        "agent-session.session-boundary.v1",
+        "updater.remote-control.v1",
+        "agent-session.host-authority.v1",
+        "agent-session.omp-resume-path.v1",
+        "files.mutation-ownership.v1",
+        "accounts.import-host-credentials.v1",
+        "accounts.codex-reset-credit.v1",
+        "browser.certificate-trust.v1"
+      ]
+    },
+    "graph": {
+      "state": "ready"
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

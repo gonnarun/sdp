@@ -1,0 +1,30 @@
+{
+  "id": "6e957b24-c25a-442d-a4fb-eceb62efc203",
+  "ok": true,
+  "result": {
+    "task": {
+      "id": "task_a96c3d9ffaad",
+      "parent_id": null,
+      "created_by_terminal_handle": "term_12040757-ac58-44c0-8a02-ed5c19daaacc",
+      "task_title": "sdp-orca-contract-probe",
+      "display_name": "sdp-orca-contract-probe",
+      "spec": "Write a file named STATUS.md in the repository root containing exactly the two lines \"status: done\" and \"note: orca contract probe\". Then stop. Do nothing else - do not modify any other file, do not run tests, do not commit.",
+      "status": "ready",
+      "deps": "[]",
+      "result": null,
+      "created_at": "2026-08-09 06:04:26",
+      "completed_at": null,
+      "run_id": "run_6ad8b0b568b2",
+      "created_by_pane_key": "a538eec6-14c7-4f10-8c94-573f23279bfb:b3286ac4-2251-4b13-a1cc-bf5aa775db1f",
+      "created_by_process_incarnation": "5b76514b-55be-4c37-a1af-ae2135ec24c5::/Users/dev/workspace/sdp@@0b1c4400:48f76715-88d8-4df2-837e-22051e93096a",
+      "created_by_run_generation": 1
+    },
+    "mutation": {
+      "requestId": "a093c6d7-950e-4faf-8e71-55fed04fe19f",
+      "replayed": false
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

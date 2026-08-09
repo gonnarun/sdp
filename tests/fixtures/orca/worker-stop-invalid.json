@@ -1,0 +1,11 @@
+{
+  "id": "1d3f50bd-a5ae-4567-9686-8ff5d44af0f2",
+  "ok": false,
+  "error": {
+    "code": "dispatch_not_found",
+    "message": "Dispatch ctx_doesnotexist99 was not found."
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}

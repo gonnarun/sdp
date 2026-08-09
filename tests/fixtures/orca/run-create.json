@@ -1,0 +1,27 @@
+{
+  "id": "b59a23f7-4975-4f04-b593-afd364165807",
+  "ok": true,
+  "result": {
+    "run": {
+      "id": "run_6ad8b0b568b2",
+      "objective": "SDP orca-mode contract probe",
+      "home_database": "this_database",
+      "coordinator_handle": "term_12040757-ac58-44c0-8a02-ed5c19daaacc",
+      "coordinator_pane_key": "a538eec6-14c7-4f10-8c94-573f23279bfb:b3286ac4-2251-4b13-a1cc-bf5aa775db1f",
+      "consumer_generation": 1,
+      "legacy": 0,
+      "created_at": "2026-08-09T06:04:19Z",
+      "updated_at": "2026-08-09T06:04:19Z"
+    },
+    "binding": {
+      "consumerGeneration": 1
+    },
+    "mutation": {
+      "requestId": "c443a8cb-0da3-460f-b90f-690fbdb9fa0a",
+      "replayed": false
+    }
+  },
+  "_meta": {
+    "runtimeId": "00000000-0000-4000-8000-000000000000"
+  }
+}
