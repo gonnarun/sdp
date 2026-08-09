@@ -42,6 +42,13 @@
 #     task_id is recorded with dispatch_id null, never auto-retried) — also
 #     covers init finding an existing state file (never re-dispatch) ·
 #   7 worker died (state proves failed/stopped) ·
+#   9/10/11/12 the SDP verdict read from STATUS.md's CONTENT — 9 unrecognized,
+#     10 FAIL_12X, 11 HALT_BLOCK, 12 PAUSE_USER_INPUT_REQUIRED. Same codes and
+#     same meanings as run_segment_tmux.sh, deliberately, so a caller can treat
+#     the two adapters alike. N3 (REQ-034): gate on CONTENT, never on presence —
+#     Orca reports `state: succeeded` for a worker whose SDP verdict is
+#     FAIL_12X, because it is answering "did the process end cleanly", not "did
+#     the workflow pass" (§3.3). Measured 2026-08-09 on a live 5-worker run ·
 #   124 past the configured deadline, still alive — NOTHING is stopped; Orca's
 #       own guide forbids killing a worker for exceeding wall-clock (§3.1b) ·
 #   125 worker settled successfully but wrote no STATUS.md ·
@@ -63,8 +70,15 @@
 #      tests/review_gate.sh uses for reviewer binaries.
 #      Also: SDP_ORCA_BIN (orca executable, default "orca"), SDP_ORCA_AGENT
 #      (default "claude"), SDP_ORCA_MODEL, SDP_ORCA_EFFORT (requires
-#      SDP_ORCA_MODEL), SDP_ORCA_BASE_BRANCH (default: omitted -> repo
-#      default base), SDP_CORE_FILE, SDP_RULES_INCLUDE, CLAUDE_PROJECT_DIR.
+#      SDP_ORCA_MODEL), SDP_ORCA_BASE_BRANCH (ref to branch FROM, default
+#      HEAD; resolved to an immutable SHA before dispatch and recorded as
+#      base_sha), SDP_CORE_FILE, SDP_RULES_INCLUDE, CLAUDE_PROJECT_DIR.
+#
+# Identity: the segment directory's basename becomes the Orca worktree --name,
+# which Orca turns into both the worktree directory and the branch
+# "<repo.gitUsername>/<name>". That is how N parallel dispatches stay
+# distinguishable, so the name is validated and never silently rewritten, and
+# init refuses when the branch it would produce already exists.
 # =============================================================================
 set -euo pipefail
 
@@ -151,9 +165,17 @@ else:
 ' "$1" "$2"
 }
 
-# _match_repo JSON WORKSPACE_ROOT_CANON -> "<repoId>\t<repoPath>" for the SOLE
-# repo whose realpath equals WORKSPACE_ROOT_CANON. Zero or >1 matches -> exit
-# 1 (ambiguous or absent — never "pick the first", per §3.1's strict table).
+# _match_repo JSON WORKSPACE_ROOT_CANON -> "<repoId>\t<repoPath>\t<gitUsername>"
+# for the SOLE repo whose realpath equals WORKSPACE_ROOT_CANON. Zero or >1
+# matches -> exit 1 (ambiguous or absent — never "pick the first", per §3.1's
+# strict table).
+# gitUsername is carried because Orca derives a new worktree's branch as
+# "<gitUsername>/<--name>" (measured on two repos and confirmed by prediction
+# on six live dispatches). It is what lets the adapter know the branch BEFORE
+# the worker exists, instead of discovering it afterwards. Absent or empty is
+# NOT fatal: the branch is then confirmed from worker-show rather than
+# predicted, so an Orca that stops emitting the field degrades to observation
+# instead of refusing to dispatch.
 _match_repo() {
   python3 -c '
 import json, sys, os
@@ -181,10 +203,11 @@ for r in repos:
     except Exception:
         continue
     if rp == target:
-        hits.append((rid, rp))
+        gu = r.get("gitUsername")
+        hits.append((rid, rp, gu if isinstance(gu, str) else ""))
 if len(hits) != 1:
     sys.exit(1)
-print(hits[0][0] + "\t" + hits[0][1])
+print("\t".join(hits[0]))
 ' "$1" "$2"
 }
 
@@ -227,11 +250,11 @@ print(repo_id + "\t" + path)
 # a cheap deadline comparison respectively — both derivable from, never in
 # conflict with, the documented fields.
 _write_state() {
-  local task_id="$1" dispatch_id="$2" worktree_path="$3" worktree_id="$4" start_epoch="$5" deadline_epoch="$6" orca_cli="$7"
+  local task_id="$1" dispatch_id="$2" worktree_path="$3" worktree_id="$4" start_epoch="$5" deadline_epoch="$6" orca_cli="$7" base_sha="${8:-}" branch="${9:-}"
   local tmp="${STATE_FILE}.tmp"
   python3 -c '
 import json, sys, datetime
-task_id, dispatch_id, worktree_path, worktree_id, start_epoch, deadline_epoch, orca_cli, out = sys.argv[1:9]
+task_id, dispatch_id, worktree_path, worktree_id, start_epoch, deadline_epoch, orca_cli, base_sha, branch, out = sys.argv[1:11]
 def rfc3339(e):
     return datetime.datetime.fromtimestamp(int(e), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 rec = {
@@ -240,6 +263,8 @@ rec = {
     "dispatch_id": dispatch_id or None,
     "worktree_path": worktree_path or None,
     "worktree_id": worktree_id or None,
+    "base_sha": base_sha or None,
+    "branch": branch or None,
     "started_at": rfc3339(start_epoch),
     "deadline_at": rfc3339(deadline_epoch),
     "deadline_epoch": int(deadline_epoch),
@@ -249,7 +274,7 @@ rec = {
 with open(out, "w") as fh:
     json.dump(rec, fh)
     fh.write("\n")
-' "$task_id" "$dispatch_id" "$worktree_path" "$worktree_id" "$start_epoch" "$deadline_epoch" "$orca_cli" "$tmp"
+' "$task_id" "$dispatch_id" "$worktree_path" "$worktree_id" "$start_epoch" "$deadline_epoch" "$orca_cli" "$base_sha" "$branch" "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
 
@@ -268,20 +293,36 @@ _call() {
   return "$_rc"
 }
 
-# _compose_spec RULES_CLAUSE -> the orchestration task spec. Reuses
-# SEGMENT_DIR/INPUT.md as-is for the segment scope — "no new handover format"
-# (design §3.2) — wrapped in the SAME anchor + "run the SDP core unattended"
-# preamble run_segment_tmux.sh's _preamble() uses. Unlike the tmux adapter,
-# the worker's cwd IS the fresh worktree Orca creates, so anchoring and
-# STATUS.md both target the literal shell expression "$(pwd)" / "current
-# worktree root" for the WORKER to resolve at its own runtime, rather than a
-# path this adapter could thread in ahead of time.
+# _compose_spec RULES_CLAUSE BRANCH -> the orchestration task spec, with the
+# handover text INLINED rather than referenced.
+#
+# The tmux adapter can point the worker at ${SEGMENT_DIR}/INPUT.md because
+# there SEGMENT_DIR *is* the worktree, so the file is inside the session's own
+# cwd. Under `orca` it is not: Orca creates the worktree elsewhere, so the same
+# sentence would order the worker to read an absolute path OUTSIDE the tree it
+# was told to confine itself to — a capability nothing had established, whose
+# failure would land BEFORE the worker learned its scope. The design said to
+# inline it from the start ("the handover text SDP already composes for
+# `manual` becomes the task spec — no new handover format", §3.2); an earlier
+# implementation deviated. Measured 2026-08-09: a 2092-char spec carrying
+# Unicode, emoji, quotes, backticks, $(), backslashes and $HOME arrived at the
+# worker byte-identical and untruncated.
+#
+# Consequences worth knowing: nothing outside the worktree is read, INPUT.md
+# never exists in the worktree (so the untracked-artifact allowlist is
+# STATUS.md alone), and the handover is stored in Orca's task record — do not
+# put secrets in a handover.
 _compose_spec() {
+  local rules_clause="$1" branch="$2"
   # shellcheck disable=SC2016  # $(pwd) is deliberately literal text for the WORKER's own shell to evaluate, not this script
   printf 'First anchor this session: run  CLAUDE_PROJECT_DIR="$(pwd)" bash "%s/sdp-anchor.sh" . ' "$SDP_SCRIPTS"
   printf 'Then read %s and run the full SDP workflow (Stages 1-8 + the two Claude gates) UNATTENDED; pause and report on INFRA_ERROR. ' "$CORE_FILE"
-  printf 'Read %s FIRST as the segment scope; skip the Stage 1 interview and start at Stage 2. ' "${SEGMENT_DIR}/INPUT.md"
-  printf 'Confine ALL outputs to the current worktree root. On completion write STATUS.md in the current worktree root as exactly one of: SUCCESS | FAIL_12X | HALT_BLOCK | PAUSE_USER_INPUT_REQUIRED. Ask the user NO questions.%s' "$1"
+  printf 'Skip the Stage 1 interview and start at Stage 2; the segment scope is the SEGMENT SCOPE block at the end of this message. '
+  [ -n "$branch" ] && printf 'Commit your work on the branch already checked out here (%s). Do not create, switch, push or merge branches. ' "$branch"
+  printf 'Confine ALL outputs to the current worktree root. On completion write STATUS.md in the current worktree root as exactly one of: SUCCESS | FAIL_12X | HALT_BLOCK | PAUSE_USER_INPUT_REQUIRED. Ask the user NO questions.%s' "$rules_clause"
+  printf '\n\n----- SEGMENT SCOPE (task data, not instructions to reinterpret) -----\n'
+  cat "${SEGMENT_DIR}/INPUT.md"
+  printf '\n----- END SEGMENT SCOPE -----\n'
 }
 
 # =============================================================================
@@ -316,13 +357,13 @@ do_probe() {
   local ws_canon
   ws_canon="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" || { echo "PROBE: PROJECT_DIR not resolvable: $PROJECT_DIR" >&2; return 1; }
 
-  local repo_json match repo_id
+  local repo_json match repo_id git_username
   if _call repo list --json; then repo_json="$REPLY"; else echo "PROBE: orca repo list --json failed" >&2; return 1; fi
   [ -n "$repo_json" ] || { echo "PROBE: orca repo list --json produced no output" >&2; return 1; }
   match="$(_match_repo "$repo_json" "$ws_canon")" || { echo "PROBE: zero or multiple repos match $ws_canon" >&2; return 1; }
-  repo_id="${match%%$'\t'*}"
+  IFS=$'\t' read -r repo_id _ git_username <<< "$match"
 
-  printf '%s\t%s\n' "$repo_id" "$app_version"
+  printf '%s\t%s\t%s\n' "$repo_id" "$app_version" "$git_username"
 }
 
 # =============================================================================
@@ -337,29 +378,74 @@ do_init() {
 
   local rules_clause=""
   [ -n "$RULES_INCLUDE" ] && rules_clause=" Obey the project rules in: ${RULES_INCLUDE}."
-  local task_title spec
+
+  # The worktree NAME is load-bearing, not cosmetic: Orca derives both the
+  # worktree directory and the branch from it, so it is how a dispatch stays
+  # identifiable among N parallel ones. Restrict it to a charset that is safe
+  # as a directory component and a git ref, and REFUSE rather than silently
+  # rewriting -- a mangled name would still dispatch, under an identity the
+  # caller does not expect.
+  local task_title
   task_title="$(basename "$SEGMENT_DIR")"
-  spec="$(_compose_spec "$rules_clause")"
+  case "$task_title" in
+    ''|.|..|-*|*/*) echo "ERROR: unusable segment name '$task_title'" >&2; exit 3 ;;
+    *[!A-Za-z0-9._-]*) echo "ERROR: segment name '$task_title' has characters outside [A-Za-z0-9._-]; rename the segment dir (never silently rewritten -- it becomes the worktree and branch name)" >&2; exit 3 ;;
+  esac
+
+  # Pin the base to an immutable SHA, not a moving ref. `--base-branch` accepts
+  # a full SHA (measured), so recording `rev-parse <ref>` and passing the REF
+  # would leave a window in which the ref advances before Orca resolves it --
+  # the recorded base would then not be the base the worktree actually got, and
+  # an ancestry check would still pass. Resolve once, pass and record the same
+  # bytes.
+  local base_ref base_sha
+  base_ref="${ORCA_BASE_BRANCH:-HEAD}"
+  base_sha="$(git -C "$PROJECT_DIR" rev-parse --verify "${base_ref}^{commit}" 2>/dev/null)" || {
+    echo "ERROR: cannot resolve base ref '$base_ref' in $PROJECT_DIR" >&2; exit 3; }
 
   if [ -n "$DRYRUN" ]; then
+    # The branch cannot be predicted here: gitUsername comes from the probe,
+    # which DRYRUN deliberately does not run. Report it as such rather than
+    # printing a guess.
+    local dry_spec
+    dry_spec="$(_compose_spec "$rules_clause" "")"
     echo "DRYRUN ok"
     echo "  mode          : init"
     echo "  batch_dir     : $BATCH_DIR"
     echo "  segment_dir   : $SEGMENT_DIR"
     echo "  agent         : $ORCA_AGENT"
     echo "  model/effort  : ${ORCA_MODEL:-<default>}/${ORCA_EFFORT:-<default>}"
-    echo "  task_title    : $task_title"
+    echo "  worktree_name : $task_title"
     echo "  timeout       : ${TIMEOUT_SECONDS}s"
-    echo "  base_branch   : ${ORCA_BASE_BRANCH:-<repo default>}"
+    echo "  base_ref      : $base_ref"
+    echo "  base_sha      : $base_sha"
+    echo "  expected_branch: <unknown under DRYRUN — needs gitUsername from the probe>"
     echo "  state_file    : $STATE_FILE"
-    echo "  spec_bytes    : $(printf '%s' "$spec" | wc -c | tr -d ' ')"
+    echo "  spec_bytes    : $(printf '%s' "$dry_spec" | wc -c | tr -d ' ')"
     echo "  note          : capability probe + all orca calls skipped under DRYRUN"
     exit 0
   fi
 
-  local probe_out repo_id app_version
+  local probe_out repo_id app_version git_username
   probe_out="$(do_probe)" || { echo "ERROR: Orca capability probe failed — fall back to manual" >&2; exit 5; }
-  repo_id="${probe_out%%$'\t'*}"; app_version="${probe_out#*$'\t'}"
+  IFS=$'\t' read -r repo_id app_version git_username <<< "$probe_out"
+
+  # Predict the branch, and refuse if that identity is already taken. Teardown
+  # deliberately preserves a branch that carries work (measured), so re-running
+  # a segment of the same name after a completed dispatch WOULD collide -- and
+  # a collision is exactly the state in which "which worktree is this task's"
+  # stops having one answer. Refuse; never adopt an existing branch.
+  local expected_branch=""
+  if [ -n "$git_username" ]; then
+    expected_branch="${git_username}/${task_title}"
+    if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/${expected_branch}"; then
+      echo "ERROR: branch ${expected_branch} already exists — a previous dispatch of '${task_title}' left it behind (worktree removal preserves branches that carry commits). Integrate or delete it, or rename the segment. Refusing to dispatch into an ambiguous identity." >&2
+      exit 6
+    fi
+  fi
+
+  local spec
+  spec="$(_compose_spec "$rules_clause" "$expected_branch")"
 
   local start_epoch deadline_epoch
   start_epoch="$(date +%s)"; deadline_epoch=$((start_epoch + TIMEOUT_SECONDS))
@@ -382,10 +468,16 @@ do_init() {
   fi
   task_id="$(_get "$task_json" "result.task.id")" || { echo "ERROR: result.task.id missing from task-create" >&2; exit 5; }
 
+  # --name is not cosmetic: it is what makes the worktree path and the branch
+  # predictable, and therefore what makes N parallel dispatches distinguishable.
+  # --base-branch carries the pinned SHA, never the ref it came from.
+  # --setup run rather than inherit: `inherit` can resolve to skip, and a worker
+  # that starts before its repo's setup ran fails in a way that looks like a
+  # task failure.
   local start_args
   start_args=(orchestration worker-start --task "$task_id" --worktree new-child --agent "$ORCA_AGENT"
-              --repo "id:$repo_id" --setup inherit --timeout-ms "$((TIMEOUT_SECONDS * 1000))" --json)
-  [ -n "$ORCA_BASE_BRANCH" ] && start_args+=(--base-branch "$ORCA_BASE_BRANCH")
+              --name "$task_title" --repo "id:$repo_id" --base-branch "$base_sha"
+              --setup run --timeout-ms "$((TIMEOUT_SECONDS * 1000))" --json)
   [ -n "$ORCA_MODEL" ] && start_args+=(--model "$ORCA_MODEL")
   [ -n "$ORCA_MODEL" ] && [ -n "$ORCA_EFFORT" ] && start_args+=(--effort "$ORCA_EFFORT")
 
@@ -396,7 +488,7 @@ do_init() {
   local start_state
   start_state="$(_get "$start_json" "result.state")" || start_state=""
   if [ "$start_state" != "ready" ]; then
-    _write_state "$task_id" "" "" "" "$start_epoch" "$deadline_epoch" "$app_version"
+    _write_state "$task_id" "" "" "" "$start_epoch" "$deadline_epoch" "$app_version" "$base_sha" ""
     echo "ERROR: worker-start did not reach ready (state=${start_state:-<none>})" >&2
     echo "  stage            : $(_get "$start_json" "result.stage" || echo '<unavailable>')" >&2
     echo "  effects          : $(_get "$start_json" "result.effects" || echo '<unavailable>')" >&2
@@ -411,18 +503,67 @@ do_init() {
   eff_repo_id="${worktree_pair%%$'\t'*}"; worktree_path="${worktree_pair#*$'\t'}"
   worktree_id="${eff_repo_id}::${worktree_path}"
 
-  _write_state "$task_id" "$dispatch_id" "$worktree_path" "$worktree_id" "$start_epoch" "$deadline_epoch" "$app_version"
-  echo "dispatched: task=$task_id dispatch=$dispatch_id worktree=$worktree_path"
+  # CONFIRM the branch, do not trust the prediction. worker-start carries no
+  # branch field at all; worker-show does (result.terminal.branch). Recording an
+  # unconfirmed guess would make the state file assert something never observed.
+  # A prediction that disagrees with the observation is reported, not smoothed
+  # over -- it would mean the naming rule this adapter relies on has changed.
+  local branch=""
+  if _call orchestration worker-show --dispatch "$dispatch_id" --json; then
+    branch="$(_get "$REPLY" "result.terminal.branch" || echo "")"
+    branch="${branch#refs/heads/}"
+  fi
+  if [ -n "$expected_branch" ] && [ -n "$branch" ] && [ "$branch" != "$expected_branch" ]; then
+    echo "WARNING: branch is '$branch' but '<gitUsername>/<name>' predicted '$expected_branch' — recording the observed value; the derivation rule may have changed" >&2
+  fi
+
+  _write_state "$task_id" "$dispatch_id" "$worktree_path" "$worktree_id" "$start_epoch" "$deadline_epoch" "$app_version" "$base_sha" "$branch"
+  echo "dispatched: task=$task_id dispatch=$dispatch_id worktree=$worktree_path branch=${branch:-<unconfirmed>} base=$base_sha"
+}
+
+# _report_result WORKTREE_PATH BASE_SHA BRANCH
+# Prints what an integrator needs and cannot get from a verdict word: the exact
+# commit to merge, whether it descends from the base this dispatch pinned, the
+# branch actually checked out, and anything left dirty. INFORMATIONAL ONLY --
+# it never changes the exit code. The verdict answers "did the workflow pass";
+# this answers "what exactly would I be merging", and conflating the two would
+# make a reporting gap look like a task failure. Integrate result_sha, never a
+# branch name: a branch can move between this call and the merge.
+#
+# The expected steady state is a dirty set of exactly `?? STATUS.md`: the
+# handover is inlined into the task spec, so no INPUT.md exists in the
+# worktree, and STATUS.md is deliberately never committed.
+_report_result() {
+  local wt="$1" base="$2" branch="$3"
+  git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || { echo "  result: <$wt is not a git worktree>"; return 0; }
+  local head cur dirty
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '<unknown>')"
+  cur="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || echo '<detached>')"
+  echo "  result_sha : $head"
+  echo "  branch     : $cur${branch:+ (recorded: $branch)}"
+  [ -n "$branch" ] && [ "$cur" != "$branch" ] && echo "  WARNING    : checked-out branch differs from the one recorded at dispatch"
+  if [ -n "$base" ]; then
+    if [ "$head" = "$base" ]; then
+      echo "  ancestry   : NO NEW COMMIT — HEAD is still the pinned base $base"
+    elif git -C "$wt" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+      echo "  ancestry   : ok — descends from pinned base $base"
+    else
+      echo "  ancestry   : WARNING — does NOT descend from the pinned base $base"
+    fi
+  fi
+  dirty="$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null | tr '\n' ';')"
+  echo "  dirty      : ${dirty:-<clean>}"
 }
 
 # =============================================================================
-# do_status: worker-show against the recorded dispatch id. Reports only
-# whether the WORKER settled — STATUS.md remains the SDP verdict (§3.3).
+# do_status: worker-show against the recorded dispatch id. The WORKER's state
+# answers only whether the process ended; STATUS.md's CONTENT is the SDP
+# verdict (§3.3, N3/REQ-034).
 # =============================================================================
 do_status() {
   [ -e "$STATE_FILE" ] || { echo "ERROR: no dispatch recorded for $SEGMENT_DIR ($STATE_FILE missing) — never guess/re-dispatch" >&2; exit 5; }
 
-  local state_json v task_id dispatch_id worktree_path deadline_epoch
+  local state_json v task_id dispatch_id worktree_path deadline_epoch base_sha branch
   state_json="$(cat "$STATE_FILE" 2>/dev/null)" || { echo "ERROR: cannot read $STATE_FILE" >&2; exit 5; }
   v="$(_get "$state_json" "v")" || { echo "ERROR: $STATE_FILE unreadable (no v)" >&2; exit 5; }
   [ "$v" = "1" ] || { echo "ERROR: $STATE_FILE has unrecognized schema v=$v" >&2; exit 5; }
@@ -430,6 +571,11 @@ do_status() {
   dispatch_id="$(_get "$state_json" "dispatch_id")" || { echo "ERROR: $STATE_FILE has no dispatch_id (orphaned partial dispatch, task_id=$task_id) — resolve manually, never guess" >&2; exit 5; }
   worktree_path="$(_get "$state_json" "worktree_path")" || { echo "ERROR: $STATE_FILE missing worktree_path" >&2; exit 5; }
   deadline_epoch="$(_get "$state_json" "deadline_epoch")" || { echo "ERROR: $STATE_FILE missing deadline_epoch" >&2; exit 5; }
+  # base_sha/branch are additive: a record written by an older adapter has
+  # neither, and the ancestry check below simply does not run rather than the
+  # whole call failing.
+  base_sha="$(_get "$state_json" "base_sha" || echo "")"
+  branch="$(_get "$state_json" "branch" || echo "")"
 
   if [ -n "$DRYRUN" ]; then
     echo "DRYRUN ok"
@@ -458,13 +604,28 @@ do_status() {
   if [ "$wstage" = "settled" ]; then
     case "$wstate" in
       succeeded)
-        if [ -s "${worktree_path}/STATUS.md" ]; then
-          echo "settled: STATUS.md present at ${worktree_path}/STATUS.md"
-          exit 0
-        else
+        # `succeeded` answers "did the PROCESS end cleanly", not "did the SDP
+        # workflow pass" (§3.3). Measured 2026-08-09: a worker whose STATUS.md
+        # said FAIL_12X still reported succeeded/settled/completed. Reading
+        # presence alone therefore turns every failed segment into a success.
+        # N3 (REQ-034) — gate on CONTENT, exactly as run_segment_tmux.sh does,
+        # with the same exit codes so a caller can treat both adapters alike.
+        [ -s "${worktree_path}/STATUS.md" ] || {
           echo "ERROR: worker settled (succeeded) but no STATUS.md at ${worktree_path}" >&2
-          exit 125
-        fi ;;
+          exit 125; }
+        [ -f "${worktree_path}/STATUS.md" ] || {
+          echo "ERROR: ${worktree_path}/STATUS.md is not a regular file" >&2
+          exit 9; }
+        local verdict
+        verdict="$(head -n1 "${worktree_path}/STATUS.md" 2>/dev/null | tr -d '[:space:]')"
+        _report_result "$worktree_path" "$base_sha" "$branch"
+        case "$verdict" in
+          SUCCESS)                   echo "settled: SUCCESS"; exit 0 ;;
+          FAIL_12X)                  echo "settled: FAIL_12X" >&2;  exit 10 ;;
+          HALT_BLOCK)                echo "settled: HALT_BLOCK" >&2; exit 11 ;;
+          PAUSE_USER_INPUT_REQUIRED) echo "settled: PAUSE_USER_INPUT_REQUIRED" >&2; exit 12 ;;
+          *) echo "ERROR: STATUS.md content unrecognized: '${verdict}'" >&2; exit 9 ;;
+        esac ;;
       failed|stopped)
         echo "ERROR: worker settled state=$wstate" >&2
         exit 7 ;;
@@ -550,7 +711,8 @@ case "$MODE" in
     fi
     probe_out=""
     if probe_out="$(do_probe)"; then
-      echo "probe ok: repo_id=${probe_out%%$'\t'*} app_version=${probe_out#*$'\t'}"
+      IFS=$'\t' read -r _p_repo _p_ver _p_user <<< "$probe_out"
+      echo "probe ok: repo_id=$_p_repo app_version=$_p_ver git_username=${_p_user:-<absent>}"
       exit 0
     else
       exit 5
