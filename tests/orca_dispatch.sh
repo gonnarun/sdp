@@ -160,8 +160,9 @@ SEG_INIT="$TMP/seg-dryrun-init"; mkdir -p "$SEG_INIT"; printf 'scope\n' > "$SEG_
 out="$(SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" bash "$ADAPTER" "$BATCH" "$SEG_INIT" init 777 2>&1)"; rc=$?
 { [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF "DRYRUN ok" \
     && printf '%s' "$out" | grep -qF "  timeout       : 777s" \
+    && printf '%s' "$out" | grep -qF "  agent         : codex" \
     && printf '%s' "$out" | grep -qF "  state_file    : ${SEG_INIT}/.orca_dispatch.json"; } \
-  && ok "DRYRUN init -> 0, prints timeout + state_file plan lines" \
+  && ok "DRYRUN init -> 0, pins Codex agent and prints timeout + state_file" \
   || bad "DRYRUN init (rc=$rc): $out"
 
 SEG_STATUS="$TMP/seg-dryrun-status"; mkdir -p "$SEG_STATUS"
@@ -509,6 +510,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 task_id, dispatch_id, wt_path, wt_id = sys.argv[2:6]
 print(1 if (d["v"] == 1 and d["task_id"] == task_id and d["dispatch_id"] == dispatch_id
+            and d["agent"] == "codex" and d["schema_version"] == 2
             and d["worktree_path"] == wt_path
             and d["worktree_id"] == wt_id)
         else 0)
@@ -544,14 +546,10 @@ fi
   || bad "init worker-start-fail (rc=$rc, pf_ok=$pf_ok)"
 
 # ==============================================================================
-# 8b. Optional/bonus: SDP_ORCA_AGENT/MODEL/EFFORT/BASE_BRANCH reach the real
-#     worker-start argv, read back from the stub's invocation log (same
-#     technique tests/review_gate.sh uses for its H1/H3 argv assertions).
-#     Specifically covers the untested conditional: the adapter passes
-#     --effort only when --model was also passed (`[ -n "$ORCA_MODEL" ] &&
-#     [ -n "$ORCA_EFFORT" ]`), so a model-less --effort must never leak.
+# 8b. Worker identity is invariant: agent/model/effort environment inputs cannot
+#     turn a Codex implementation dispatch back into Claude. Base ref remains configurable.
 # ==============================================================================
-echo "== bonus: worker-start argv reflects SDP_ORCA_AGENT/MODEL/EFFORT/BASE_BRANCH =="
+echo "== bonus: worker-start argv pins Codex and ignores agent/model/effort overrides =="
 reset_resp
 set_resp status "$(cat "$FIXDIR/status.json")" 0
 set_resp agent_context "$(cat "$FIXDIR/schema-version.json")" 0
@@ -569,31 +567,32 @@ git -C "$PROJ" branch -f develop HEAD >/dev/null 2>&1
 DEV_SHA="$(git -C "$PROJ" rev-parse develop)"
 SEG_ARGV="$TMP/seg-argv"; mkdir -p "$SEG_ARGV"; printf 'scope\n' > "$SEG_ARGV/INPUT.md"
 base=$(log_lines)
-SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" SDP_ORCA_AGENT="codex" \
-  SDP_ORCA_MODEL="gpt-hypothetical" SDP_ORCA_EFFORT="high" SDP_ORCA_BASE_BRANCH="develop" \
+SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" SDP_ORCA_AGENT="claude" \
+  SDP_ORCA_MODEL="claude-opus" SDP_ORCA_EFFORT="high" SDP_ORCA_BASE_BRANCH="develop" \
   bash "$ADAPTER" "$BATCH" "$SEG_ARGV" init 300 >/dev/null 2>&1
 argv_line="$(log_since "$base" | grep "orchestration worker-start" | head -1)"
 { printf '%s' "$argv_line" | grep -q -- "--agent codex" \
-    && printf '%s' "$argv_line" | grep -q -- "--model gpt-hypothetical" \
-    && printf '%s' "$argv_line" | grep -q -- "--effort high" \
+    && ! printf '%s' "$argv_line" | grep -q -- "--agent claude" \
+    && ! printf '%s' "$argv_line" | grep -q -- "--model" \
+    && ! printf '%s' "$argv_line" | grep -q -- "--effort" \
     && printf '%s' "$argv_line" | grep -q -- "--name seg-argv" \
     && printf '%s' "$argv_line" | grep -q -- "--base-branch $DEV_SHA" \
     && ! printf '%s' "$argv_line" | grep -q -- "--base-branch develop"; } \
-  && ok "worker-start argv: AGENT/MODEL/EFFORT reach the CLI, --name is passed, base is a pinned SHA not a ref name" \
-  || bad "worker-start argv missing expected flags: $argv_line"
+  && ok "worker-start argv: Codex pinned, Claude model/effort ignored, base SHA pinned" \
+  || bad "worker-start invariant missing: $argv_line"
 
 SEG_ARGV2="$TMP/seg-argv2"; mkdir -p "$SEG_ARGV2"; printf 'scope\n' > "$SEG_ARGV2/INPUT.md"
 base=$(log_lines)
 SDP_ORCA_BIN="$STUB_BIN" CLAUDE_PROJECT_DIR="$PROJ" SDP_ORCA_EFFORT="high" \
-  bash "$ADAPTER" "$BATCH" "$SEG_ARGV2" init 300 >/dev/null 2>&1   # SDP_ORCA_MODEL left unset
+  bash "$ADAPTER" "$BATCH" "$SEG_ARGV2" init 300 >/dev/null 2>&1
 HEAD_SHA="$(git -C "$PROJ" rev-parse HEAD)"
 argv_line2="$(log_since "$base" | grep "orchestration worker-start" | head -1)"
-{ printf '%s' "$argv_line2" | grep -q -- "--agent claude" \
+{ printf '%s' "$argv_line2" | grep -q -- "--agent codex" \
     && ! printf '%s' "$argv_line2" | grep -q -- "--model" \
     && ! printf '%s' "$argv_line2" | grep -q -- "--effort" \
     && printf '%s' "$argv_line2" | grep -q -- "--base-branch $HEAD_SHA"; } \
-  && ok "worker-start argv: --effort omitted when SDP_ORCA_MODEL is unset; base still pinned (defaults to HEAD's SHA)" \
-  || bad "worker-start argv: --effort leaked without a model, or base not pinned: $argv_line2"
+  && ok "worker-start argv: Codex default; model/effort absent; HEAD SHA pinned" \
+  || bad "worker-start Codex/default-base invariant failed: $argv_line2"
 
 # The segment basename becomes the worktree name AND the branch, so it is
 # validated rather than silently rewritten -- a mangled name would still

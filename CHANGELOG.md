@@ -11,6 +11,7 @@ SDP is pre-1.0: config keys, marker grammar and the gate CLI may change between 
 - English `COMMAND_MANUAL.md` with a Korean sync copy (`COMMAND_MANUAL.ko.md`).
 
 ### Fixed
+- `worktree-dispatch` now launches Codex implementation workers in `auto` and `orca` modes; Claude Code is restricted to external review gates. The tmux runner probes/starts Codex, Orca pins `--agent codex`, and regression tests assert this boundary.
 - CI actions moved off the Node.js 20 runtime, which GitHub has deprecated: `actions/checkout` v4 → v7.0.1 and `actions/setup-python` v5 → v7.0.0, both on Node 24. Each is now pinned to a commit SHA rather than a movable tag.
 - `tests/smoke.sh` no longer fails on a machine with no reviewer CLI installed. `doctor` reports two axes and exits non-zero if either is unhealthy; the suite now asserts the `gate-state` axis it owns and self-skips the `toolchain` axis when neither `codex` nor `claude` is resolvable, matching `tests/run_segment.sh`'s existing skip. A wedged gate still fails the suite.
 

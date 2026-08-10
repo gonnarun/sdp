@@ -36,7 +36,7 @@ worktree:
   port_strategy: fixed             # fixed | dynamic
 
 # dispatch adapters (REQ-C-03 / REQ-C-07). batch_engine/worktree_mode default to the
-# classifier-safe paths; the tmux/auto paths use scripts/run_segment_tmux.sh when tmux+claude
+# classifier-safe paths; the tmux/auto paths use scripts/run_segment_tmux.sh when tmux+codex
 # are present and the codex auto-mode classifier does not block, else fall back to manual.
 # The orca path (opt-in only) uses scripts/orca_dispatch.sh when its own Orca-CLI capability
 # probe passes; see the worktree_mode comment below for its fallback contract and unknowns.
@@ -46,7 +46,7 @@ dispatch:
                                    # orca: opt-in, never default. Backed by scripts/orca_dispatch.sh;
                                    # see docs/KNOWN_GAPS.md NC-26 for what is unexercised.
                                    # Any probe failure falls back to
-                                   # manual ONLY — never to auto (auto's own bypassPermissions grant
+                                   # manual ONLY — never to auto (auto starts an unattended danger-full-access Codex worker
                                    # must not be silently invoked by choosing orca). Residual unknowns
                                    # (design §5): --timeout-ms semantics, the permission boundary
                                    # under a privileged action, and concurrency limits.

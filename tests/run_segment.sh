@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run_segment.sh — dry-run test for scripts/run_segment_tmux.sh.
-# Real tmux/claude sessions cannot be spawned in CI/sandbox, so this exercises
+# Real tmux/Codex sessions are not spawned in CI, so this exercises
 # arg parsing, MODE validation, exit codes, and de-domained config resolution via
 # SDP_TMUX_DRYRUN=1 (validates + prints the plan, never spawns/polls). In the
 # smoke/gate test style. Exit codes 7/124/125 need a live session (untested here).
@@ -11,16 +11,17 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
 
-# require tmux+claude present so we reach the MODE logic (this env has both);
+# require tmux+codex+git present so we reach the MODE logic;
 # if absent, every call would exit 5 and the codes below couldn't be asserted.
-if ! command -v tmux >/dev/null 2>&1 || ! command -v claude >/dev/null 2>&1; then
-  echo "SKIP - tmux/claude absent; cannot exercise MODE logic (exit-5 fallback path only)"
+if ! command -v tmux >/dev/null 2>&1 || ! command -v codex >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+  echo "SKIP - tmux/codex/git absent; cannot exercise MODE logic (exit-5 fallback path only)"
   echo "-------- 0 passed, 0 failed (skipped) --------"; exit 0
 fi
 
 TMP="$(mktemp -d -t sdp_run_seg.XXXXXX)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/batch" "$TMP/seg"
 export CLAUDE_PROJECT_DIR="$SDP_ROOT"   # resolve .sdp/defaults.yaml
+export SDP_SESSION_CWD="$SDP_ROOT"      # Codex runner requires a git-backed cwd
 run() { SDP_TMUX_DRYRUN=1 bash "$RUN" "$@" >/dev/null 2>&1; echo $?; }
 
 # exit codes
@@ -30,12 +31,14 @@ run() { SDP_TMUX_DRYRUN=1 bash "$RUN" "$@" >/dev/null 2>&1; echo $?; }
 [ "$(run "$TMP/batch" "$TMP/seg" init)" = 3 ]       && ok "init w/o INPUT.md -> exit 3" || bad "init exit 3"
 [ "$(run "$TMP/batch" "$TMP/seg" continue)" = 6 ]   && ok "continue w/o session -> exit 6" || bad "continue exit 6"
 [ "$(run "$TMP/batch" "$TMP/seg" resume)" = 6 ]     && ok "resume w/o session -> exit 6"   || bad "resume exit 6"
+bad_cwd_rc="$(SDP_SESSION_CWD="$TMP/not-a-worktree" SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" init >/dev/null 2>&1; echo $?)"
+[ "$bad_cwd_rc" = 3 ] && ok "missing/non-git worker cwd -> exit 3" || bad "invalid worker cwd exit $bad_cwd_rc"
 
-# exit 5 when tmux/claude absent (stripped PATH; guards are builtin-only and run first).
+# exit 5 when tmux/codex/git are absent (stripped PATH; guards run first).
 # Use bash's absolute path so only the SCRIPT's internal `command -v` sees the empty PATH.
 BASH_BIN="$(command -v bash)"
 rc5="$(PATH=/nonexistent SDP_TMUX_DRYRUN=1 "$BASH_BIN" "$RUN" "$TMP/batch" "$TMP/seg" init >/dev/null 2>&1; echo $?)"
-[ "$rc5" = 5 ] && ok "tmux/claude absent -> exit 5 (graceful fallback signal)" || bad "tmux-absent exit 5 (got $rc5)"
+[ "$rc5" = 5 ] && ok "tmux/codex/git absent -> exit 5 (graceful fallback signal)" || bad "tool-absent exit 5 (got $rc5)"
 
 # init OK once INPUT.md exists
 echo scope > "$TMP/seg/INPUT.md"
@@ -52,6 +55,9 @@ rm -f "$TMP/batch/.tmux_session_name"
 out="$(SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" init 2>/dev/null)"
 printf '%s' "$out" | grep -q 'session_prefix: sdp-seg' && ok "default session_prefix from config (sdp-seg)" || bad "default prefix"
 printf '%s' "$out" | grep -q "core_file .*core/SDP.md" && ok "core_file resolves to core/SDP.md (de-domained)" || bad "core_file resolution"
+{ printf '%s' "$out" | grep -qF 'worker_command: codex --ask-for-approval never --sandbox danger-full-access -C ' \
+    && ! printf '%s' "$out" | grep -qF 'claude --permission-mode'; } \
+  && ok "worker identity: dry-run launches Codex, never Claude" || bad "worker command is not Codex-only"
 out2="$(SDP_SESSION_PREFIX=myproj SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" init 2>/dev/null)"
 printf '%s' "$out2" | grep -q 'session_prefix: myproj' && ok "SDP_SESSION_PREFIX override honored" || bad "prefix override"
 # illegal prefix rejected -> falls back to sdp-seg
@@ -60,6 +66,18 @@ printf '%s' "$out3" | grep -q 'session_prefix: sdp-seg' && ok "illegal session_p
 
 # shutdown with no session is a clean no-op (exit 0)
 [ "$(run "$TMP/batch" "$TMP/seg" shutdown)" = 0 ]   && ok "shutdown w/o session -> exit 0 (no-op)" || bad "shutdown noop"
+
+# Codex TUI control verbs are explicit and observable without a live model run.
+echo live > "$TMP/batch/.tmux_session_name"
+compact_out="$(SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" compact 2>/dev/null)"
+printf '%s' "$compact_out" | grep -qF 'control_prompt: /compact' \
+  && ok "Codex TUI compact control is /compact" || bad "compact control prompt"
+shutdown_out="$(SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" shutdown 2>/dev/null)"
+printf '%s' "$shutdown_out" | grep -qF 'would /exit + kill-session' \
+  && ok "Codex TUI shutdown control is /exit" || bad "shutdown control prompt"
+rm -f "$TMP/batch/.tmux_session_name"
+send_keys_count="$(sed -n '/^send_prompt_safe()/,/^}/p' "$RUN" | grep -c 'send-keys.*C-m')"
+[ "$send_keys_count" = 1 ] && ok "Codex prompt submit uses one Enter" || bad "prompt submit Enter count=$send_keys_count"
 
 # --- token budget cap (NFR-05), with injected token counts ---
 runb() { SDP_TMUX_DRYRUN=1 SDP_TOKEN_BUDGET="$1" SDP_TOKENS_USED="$2" bash "$RUN" "$TMP/batch" "$TMP/seg" init >/dev/null 2>&1; echo $?; }
@@ -82,8 +100,8 @@ rm -f "$TMP/batch/.tokens_used"
 # unrecognized 9) lives ONLY on the live path — SDP_TMUX_DRYRUN exits before it, so
 # the dry-run cases above cannot reach it. We drive `continue` for real with a STUB
 # tmux that (a) reports the session alive (has-session -> 0) and (b) writes the
-# wanted STATUS.md content when the prompt is pasted, simulating what the claude
-# session would eventually do. No real tmux/claude session is spawned. Asserts each
+# wanted STATUS.md content when the prompt is pasted, simulating what the Codex
+# session would eventually do. No real tmux/Codex session is spawned. Asserts each
 # documented completion state yields a NON-success exit (REQ-034).
 STUBD="$TMP/stubbin"; mkdir -p "$STUBD"
 cat > "$STUBD/tmux" <<'TMUXSTUB'

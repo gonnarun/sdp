@@ -290,5 +290,25 @@ for f, exp in EXPECT.items():
 sys.exit(0 if ok else 1)
 PY
 
+# ---- (xii) Codex dispatch worker / Claude review boundary ------------------
+for f in plugins/sdp/scripts/run_segment_tmux.sh scripts/run_segment_tmux.sh; do
+  { grep -qF 'command -v codex' "$f" \
+    && grep -qF 'worker_command: $WORKER_COMMAND' "$f" \
+    && grep -qF 'codex --ask-for-approval never --sandbox danger-full-access' "$f" \
+    && ! grep -qF 'claude --permission-mode' "$f"; } \
+    && ok "(xii) $f launches Codex implementation worker" \
+    || bad "(xii) $f worker runtime is not Codex-only"
+done
+for f in plugins/sdp/skills/worktree-dispatch/SKILL.md skills/worktree-dispatch/SKILL.md; do
+  { grep -qF 'Implementation worker must be Codex' "$f" \
+    && grep -qF -- '--reviewer claude' "$f"; } \
+    && ok "(xii) $f separates Codex worker from Claude review gate" \
+    || bad "(xii) $f worker/reviewer boundary missing"
+done
+{ grep -qF 'ORCA_AGENT="codex"' plugins/sdp/scripts/orca_dispatch.sh \
+  && ! grep -qF 'ORCA_AGENT="${SDP_ORCA_AGENT' plugins/sdp/scripts/orca_dispatch.sh; } \
+  && ok "(xii) Orca pins Codex worker" \
+  || bad "(xii) Orca worker agent remains overrideable"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SDP Segment Runner (tmux long-lived claude) — vendored, de-domained.
+# SDP Segment Runner (tmux long-lived Codex) — vendored, de-domained.
 # Ported from the Project-A reference (scripts/meta_wf/run_segment_tmux.sh);
 # all project-specific literals externalized to config. Backs batch-sdp's
 # `tmux_long_lived` engine and worktree-dispatch's `auto` mode (REQ-C-03/07).
 #
-# Purpose: avoid `claude -p` billing + run unattended. One long-lived interactive
-# `claude` per batch inside tmux; each segment prompt is pushed via paste-buffer.
+# Purpose: run one long-lived interactive Codex worker per batch inside tmux;
+# each segment prompt is pushed via paste-buffer. Claude Code is review-gate only.
 # Completion signal = SEGMENT_DIR/STATUS.md (never scrape the TUI).
 #
 # Usage:  run_segment_tmux.sh <BATCH_DIR> <SEGMENT_DIR> <MODE> [TIMEOUT_SECONDS]
 #   MODE = init | continue | resume | compact | shutdown ; TIMEOUT default from
 #          dispatch.default_timeout (14400).
 # Session name: <prefix>-<batch_basename>-<sha8>   (prefix = dispatch.session_prefix)
-# Boot: `claude --permission-mode bypassPermissions`
-# Prompt push: load-buffer + paste-buffer + size-proportional sleep + double C-m
-#              (idempotent double-Enter fixes the Ink TUI render-tick race).
+# Boot: `codex --ask-for-approval never --sandbox danger-full-access -C <git-cwd>`
+# Prompt push: load-buffer + paste-buffer + size-proportional sleep + one C-m
+#              (one Enter submits the pasted prompt in the Codex TUI).
 # Completion: poll STATUS.md (1s; mtime>=invoke_ts; non-empty).
 # Exit codes: 0 SUCCESS · 1 usage · 2 BATCH_DIR missing · 3 required input missing ·
-#             4 bad MODE · 5 tmux/claude missing · 6 session-state conflict ·
+#             4 bad MODE · 5 tmux/codex/git missing · 6 session-state conflict ·
 #             7 session dead · 8 token budget exceeded (NFR-05) ·
 #             9 STATUS.md content unrecognized · 10 FAIL_12X · 11 HALT_BLOCK (content) ·
 #             12 PAUSE_USER_INPUT_REQUIRED · 124 timeout · 125 no STATUS written.
@@ -42,7 +42,8 @@ DRYRUN="${SDP_TMUX_DRYRUN:-}"
 #      even under a stripped PATH, and keep exit-code precedence 2 before 5) ----
 [ -d "$BATCH_DIR" ] || { echo "ERROR: BATCH_DIR not found: $BATCH_DIR" >&2; exit 2; }
 command -v tmux   >/dev/null 2>&1 || { echo "ERROR: tmux not installed (adapters should fall back to agent_tool/manual)" >&2; exit 5; }
-command -v claude >/dev/null 2>&1 || { echo "ERROR: claude CLI not installed (adapters should fall back)" >&2; exit 5; }
+command -v codex  >/dev/null 2>&1 || { echo "ERROR: codex CLI not installed (adapters should fall back)" >&2; exit 5; }
+command -v git    >/dev/null 2>&1 || { echo "ERROR: git not installed (Codex worker requires a repository)" >&2; exit 5; }
 
 # ---- anchor/config resolution ----
 _src="${BASH_SOURCE[0]:-$0}"
@@ -70,10 +71,16 @@ case "$DEF_TIMEOUT" in ''|*[!0-9]*) DEF_TIMEOUT=14400; TIMEOUT_SECONDS=14400 ;; 
 TOKEN_BUDGET="${SDP_TOKEN_BUDGET:-$(cfg dispatch.token_budget)}"; : "${TOKEN_BUDGET:=0}"
 case "$TOKEN_BUDGET" in ''|*[!0-9]*) TOKEN_BUDGET=0 ;; esac
 
-# session cwd: default to the segment/worktree dir so the gate's cwd-scoped KEY stays
-# per-worktree (P2 mkdir-lock / REQ-C-06); fall back to the plugin root.
+# Session cwd must be a git checkout. Never fall back to the plugin install root:
+# the Codex worker runs unattended with danger-full-access, so an explicit git cwd
+# is a required targeting guard (not a sandbox boundary).
 SESSION_CWD="${SDP_SESSION_CWD:-}"
-[ -z "$SESSION_CWD" ] && { if [ -d "$SEGMENT_DIR" ]; then SESSION_CWD="$SEGMENT_DIR"; else SESSION_CWD="$SDP_ROOT"; fi; }
+[ -z "$SESSION_CWD" ] && SESSION_CWD="$SEGMENT_DIR"
+[ -d "$SESSION_CWD" ] || { echo "ERROR: session cwd not found: $SESSION_CWD" >&2; exit 3; }
+git -C "$SESSION_CWD" rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "ERROR: session cwd is not inside a git repository: $SESSION_CWD" >&2; exit 3; }
+printf -v _quoted_session_cwd '%q' "$SESSION_CWD"
+WORKER_COMMAND="codex --ask-for-approval never --sandbox danger-full-access -C $_quoted_session_cwd"
 
 # ---- per-batch state files ----
 SESSION_NAME_FILE="${BATCH_DIR}/.tmux_session_name"
@@ -90,8 +97,7 @@ gen_session_name() {
 session_alive() { tmux has-session -t "$1" 2>/dev/null; }
 
 # send_prompt_safe: load-buffer -> paste-buffer -d -> size-proportional sleep
-# (1 + size/3000, cap 5s) -> C-m -> sleep 0.5 -> C-m again. The double-Enter is an
-# idempotent fix for the Ink TUI render-tick race (mechanism — kept verbatim).
+# (1 + size/3000, cap 5s) -> one C-m to submit in the Codex TUI.
 send_prompt_safe() {
   local session="$1" payload="$2" tmpfile size wait_s buf
   # N2 (REQ-033): the tmux buffer namespace is server-global, so a fixed buffer
@@ -107,8 +113,6 @@ send_prompt_safe() {
   size="$(printf '%s' "$payload" | wc -c | tr -d ' ')"
   wait_s=$((1 + size/3000)); [ "$wait_s" -gt 5 ] && wait_s=5
   sleep "$wait_s"
-  tmux send-keys -t "${session}:0.0" C-m
-  sleep 0.5
   tmux send-keys -t "${session}:0.0" C-m
 }
 
@@ -134,7 +138,7 @@ _preamble() {
   printf 'Confine ALL outputs to %s. Ask the user NO questions. %s' "$SEGMENT_DIR" "$_rules_clause"
 }
 
-SESSION_NAME=""; PROMPT=""; STATUS_TARGET=""; NEED_WAIT=0; COMPACT_SLEEP=0
+SESSION_NAME=""; PROMPT=""; STATUS_TARGET=""; NEED_WAIT=0; COMPACT_SLEEP=0; CONTROL_PROMPT="<task prompt>"
 case "$MODE" in
   init)
     [ -f "$SESSION_NAME_FILE" ] && { echo "ERROR: session already exists ($SESSION_NAME_FILE); use continue/shutdown" >&2; exit 6; }
@@ -157,7 +161,7 @@ case "$MODE" in
   compact)
     [ -f "$SESSION_NAME_FILE" ] || { echo "ERROR: no session file" >&2; exit 6; }
     SESSION_NAME="$(cat "$SESSION_NAME_FILE")"
-    PROMPT="/compact"; NEED_WAIT=0; COMPACT_SLEEP=120 ;;
+    PROMPT="/compact"; CONTROL_PROMPT="/compact"; NEED_WAIT=0; COMPACT_SLEEP=120 ;;
   shutdown)
     [ -f "$SESSION_NAME_FILE" ] || { echo "no session to shut down"; exit 0; }
     SESSION_NAME="$(cat "$SESSION_NAME_FILE")"
@@ -197,6 +201,8 @@ if [ -n "$DRYRUN" ]; then
   echo "  session_name  : $SESSION_NAME"
   echo "  core_file     : $CORE_FILE"
   echo "  session_cwd   : $SESSION_CWD"
+  echo "  worker_command: $WORKER_COMMAND"
+  echo "  control_prompt: $CONTROL_PROMPT"
   echo "  rules_include : ${RULES_INCLUDE:-<none>}"
   echo "  timeout       : $TIMEOUT_SECONDS"
   echo "  status_target : ${STATUS_TARGET:-<none>}"
@@ -213,7 +219,7 @@ if [ "$MODE" = "init" ]; then
   # session is confirmed live. A failed spawn must not leave a stale session
   # file; cleanup is scoped to the spawn (the file is simply never written on
   # failure) -- a blanket trap-remove would wrongly delete it on a good init.
-  tmux new-session -d -s "$SESSION_NAME" -c "$SESSION_CWD" "claude --permission-mode bypassPermissions"
+  tmux new-session -d -s "$SESSION_NAME" -c "$SESSION_CWD" "$WORKER_COMMAND"
   sleep 5
   session_alive "$SESSION_NAME" || { echo "ERROR: session $SESSION_NAME did not come up" >&2; exit 7; }
   printf '%s' "$SESSION_NAME" > "$SESSION_NAME_FILE"

@@ -21,14 +21,15 @@ Use when the user asks for `worktree-dispatch`, parallel SDP worktrees, independ
 2. Write a shared design skeleton / data-model contract for shared surfaces.
 3. For each task, create a handoff that runs full SDP Stage 2-8 in its own worktree.
 4. Dispatch mode:
-   - `manual`: emit copy-pasteable handoff blocks and worktree setup commands.
-   - `auto`: use `scripts/run_segment_tmux.sh` only when `dispatch.worktree_mode: auto` is configured and `tmux` + `claude` are available.
-   - `orca`: use `scripts/orca_dispatch.sh` only when `dispatch.worktree_mode: orca` is configured and its Orca-CLI capability probe passes; any probe failure falls back to `manual` only, never `auto`. Do not `git worktree add` for these tasks — Orca creates the worktree, and a second one would be integrated by mistake. Read the verdict from the adapter's exit code (0 SUCCESS, 10 FAIL_12X, 11 HALT_BLOCK, 12 PAUSE, 9 unrecognized), never from `STATUS.md` merely existing.
+   - `manual`: emit copy-pasteable handoff blocks and worktree setup commands; require the user to open each handoff in a Codex session.
+   - `auto`: use `scripts/run_segment_tmux.sh` only when `dispatch.worktree_mode: auto` is configured and `tmux` + `codex` are available. The runner launches Codex implementation workers; Claude Code remains review-gate only.
+   - `orca`: use `scripts/orca_dispatch.sh` only when `dispatch.worktree_mode: orca` is configured and its Orca-CLI capability probe passes. The adapter pins `--agent codex`; no agent/model override is allowed. Any probe failure falls back to `manual` only, never `auto`. Do not `git worktree add` for these tasks — Orca creates the worktree, and a second one would be integrated by mistake. Read the verdict from the adapter's exit code (0 SUCCESS, 10 FAIL_12X, 11 HALT_BLOCK, 12 PAUSE, 9 unrecognized), never from `STATUS.md` merely existing.
 5. After worktrees complete, integrate incrementally, then run deferred screen/API/data verification serially in main.
 
 ## Invariants
 
 - Each worktree session must run both `review-gate` reviews at full strength.
+- Implementation worker must be Codex in every dispatch mode. Claude Code may appear only behind `claude_review_gate` / `--reviewer claude`.
 - Dispatched sessions do not run shared screen tests against colliding local services; they produce verification checklists.
 - Main session runs merge-time verification serially after integration.
 

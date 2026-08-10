@@ -26,7 +26,7 @@ Use when the user asks for `batch-sdp`, batch SDP, segmented SDP, large-scope SD
 
 - Prefer available Codex subagents for independent segments.
 - If no subagent tool is available, run segments serially and say so.
-- Use `scripts/run_segment_tmux.sh` only when the project explicitly opts into `dispatch.batch_engine: tmux_long_lived` and `tmux` + `claude` are available.
+- Use `scripts/run_segment_tmux.sh` only when the project explicitly opts into `dispatch.batch_engine: tmux_long_lived` and `tmux` + `codex` are available. It launches Codex implementation workers; Claude Code remains review-gate only.
 
 ## Gate Adapter
 

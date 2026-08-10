@@ -71,9 +71,8 @@
 #      The probe/response-parsing logic itself is exercised by pointing
 #      SDP_ORCA_BIN at a fixture-playing stub, the same technique
 #      tests/review_gate.sh uses for reviewer binaries.
-#      Also: SDP_ORCA_BIN (orca executable, default "orca"), SDP_ORCA_AGENT
-#      (default "claude"), SDP_ORCA_MODEL, SDP_ORCA_EFFORT (requires
-#      SDP_ORCA_MODEL), SDP_ORCA_BASE_BRANCH (ref to branch FROM, default
+#      Also: SDP_ORCA_BIN (orca executable, default "orca"),
+#      SDP_ORCA_BASE_BRANCH (ref to branch FROM, default
 #      HEAD; resolved to an immutable SHA before dispatch and recorded as
 #      base_sha), SDP_CORE_FILE, SDP_RULES_INCLUDE, CLAUDE_PROJECT_DIR.
 #
@@ -120,9 +119,7 @@ case "$TIMEOUT_SECONDS" in ''|*[!0-9]*) TIMEOUT_SECONDS="$DEF_TIMEOUT" ;; esac
 case "$DEF_TIMEOUT" in ''|*[!0-9]*) DEF_TIMEOUT=14400; TIMEOUT_SECONDS=14400 ;; esac
 
 ORCA_BIN="${SDP_ORCA_BIN:-orca}"
-ORCA_AGENT="${SDP_ORCA_AGENT:-claude}"
-ORCA_MODEL="${SDP_ORCA_MODEL:-}"
-ORCA_EFFORT="${SDP_ORCA_EFFORT:-}"
+ORCA_AGENT="codex"
 ORCA_BASE_BRANCH="${SDP_ORCA_BASE_BRANCH:-}"
 
 STATE_FILE="${SEGMENT_DIR}/.orca_dispatch.json"
@@ -262,6 +259,7 @@ def rfc3339(e):
     return datetime.datetime.fromtimestamp(int(e), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 rec = {
     "v": 1,
+    "agent": "codex",
     "task_id": task_id,
     "dispatch_id": dispatch_id or None,
     "worktree_path": worktree_path or None,
@@ -272,7 +270,7 @@ rec = {
     "deadline_at": rfc3339(deadline_epoch),
     "deadline_epoch": int(deadline_epoch),
     "orca_cli": orca_cli,
-    "schema_version": 1,
+    "schema_version": 2,
 }
 with open(out, "w") as fh:
     json.dump(rec, fh)
@@ -417,7 +415,6 @@ do_init() {
     echo "  batch_dir     : $BATCH_DIR"
     echo "  segment_dir   : $SEGMENT_DIR"
     echo "  agent         : $ORCA_AGENT"
-    echo "  model/effort  : ${ORCA_MODEL:-<default>}/${ORCA_EFFORT:-<default>}"
     echo "  worktree_name : $task_title"
     echo "  timeout       : ${TIMEOUT_SECONDS}s"
     echo "  base_ref      : $base_ref"
@@ -481,8 +478,6 @@ do_init() {
   start_args=(orchestration worker-start --task "$task_id" --worktree new-child --agent "$ORCA_AGENT"
               --name "$task_title" --repo "id:$repo_id" --base-branch "$base_sha"
               --setup run --timeout-ms "$((TIMEOUT_SECONDS * 1000))" --json)
-  [ -n "$ORCA_MODEL" ] && start_args+=(--model "$ORCA_MODEL")
-  [ -n "$ORCA_MODEL" ] && [ -n "$ORCA_EFFORT" ] && start_args+=(--effort "$ORCA_EFFORT")
 
   local start_json
   _call "${start_args[@]}" || true
