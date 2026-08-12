@@ -217,5 +217,100 @@ sdp_cfg_base_dir "$TMP/unterm.yaml" >/dev/null 2>&1; urc=$?
 [ "$urc" -eq 2 ] && ok "REQ-027: unterminated base_dir quote is fatal (rc 2)" \
                  || bad "REQ-027: unterminated quote not caught (rc=$urc)"
 
+# --- REQ-001..007: canonical global-harness discovery -----------------------
+python3 - "$SDP_ROOT" "$TMP/discovery" <<'PY'
+import os, pathlib, subprocess, sys
+root, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(root / "scripts"))
+import config_discovery as cd
+
+tmp.mkdir()
+rows = []
+for raw in (root / "tests/fixtures/config-discovery-cases.tsv").read_text().splitlines():
+    if raw and not raw.startswith("#"):
+        rows.append(raw.split("\t"))
+
+for name, project_rel, xdg_rel, home_rel, expected in rows:
+    case = tmp / name; project = case / "project"; xdg = case / "xdg"; home = case / "home"
+    project.mkdir(parents=True); xdg.mkdir(); home.mkdir()
+    paths = {"project_dot": (project / ".sdp/defaults.yaml").resolve(),
+             "project_scripts": (project / "scripts/sdp/defaults.yaml").resolve(),
+             "xdg": (xdg / "sdp/defaults.yaml").resolve(),
+             "home_config": (home / ".config/sdp/defaults.yaml").resolve(),
+             "home_dot": (home / ".sdp/defaults.yaml").resolve()}
+    for rel, base in ((project_rel, project), (xdg_rel, xdg), (home_rel, home)):
+        if rel != "-":
+            p = base / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(f"case: {name}\n")
+    env = {"XDG_CONFIG_HOME": str(xdg)} if xdg_rel != "-" else {}
+    selected = cd.discover(project, "defaults.yaml", home_resolver=lambda h=home: h, environ=env)
+    got = "none" if selected is None else next(k for k, v in paths.items() if v == selected.path)
+    if got != expected:
+        raise SystemExit(f"case {name}: module got {got}, expected {expected}")
+    # Production CLI exposes no home seam; exercise its local/XDG/no-file cases.
+    if home_rel == "-":
+        proc_env = os.environ.copy(); proc_env["XDG_CONFIG_HOME"] = str(xdg)
+        cp = subprocess.run([sys.executable, str(root / "scripts/config_discovery.py"),
+                             "discover", str(project), "defaults.yaml"],
+                            text=True, capture_output=True, env=proc_env)
+        if cp.returncode != 0:
+            raise SystemExit(f"case {name}: CLI failed: {cp.stderr}")
+        cli = cp.stdout.strip()
+        expected_path = "" if expected == "none" else str(paths[expected])
+        if cli != expected_path:
+            raise SystemExit(f"case {name}: CLI got {cli!r}, expected {expected_path!r}")
+
+# HOME poisoning cannot relocate passwd-home fallback.
+p = tmp / "poison-project"; p.mkdir(); real = tmp / "real-home"; real.mkdir(); evil = tmp / "evil-home"; evil.mkdir()
+target = real / ".sdp/defaults.yaml"; target.parent.mkdir(); target.write_text("source: real\n")
+evil_target = evil / ".sdp/defaults.yaml"; evil_target.parent.mkdir(); evil_target.write_text("source: evil\n")
+sel = cd.discover(p, "defaults.yaml", home_resolver=lambda: real, environ={"HOME": str(evil)})
+assert sel and sel.path == target.resolve()
+
+# Unsafe presence fails closed and never falls through.
+for kind in ("project_ancestor", "xdg_ancestor", "leaf", "fifo", "directory", "unreadable"):
+    c = tmp / f"unsafe-{kind}"; proj = c / "project"; xdg = c / "xdg"; home = c / "home"
+    proj.mkdir(parents=True); xdg.mkdir(); home.mkdir()
+    fallback = home / ".sdp/defaults.yaml"; fallback.parent.mkdir(); fallback.write_text("fallback: true\n")
+    if kind == "project_ancestor":
+        elsewhere = c / "elsewhere"; elsewhere.mkdir(); (elsewhere / "defaults.yaml").write_text("bad: true\n")
+        (proj / ".sdp").symlink_to(elsewhere, target_is_directory=True)
+        env = {}
+    elif kind == "xdg_ancestor":
+        elsewhere = c / "elsewhere"; elsewhere.mkdir(); (elsewhere / "defaults.yaml").write_text("bad: true\n")
+        (xdg / "sdp").symlink_to(elsewhere, target_is_directory=True); env = {"XDG_CONFIG_HOME": str(xdg)}
+    elif kind == "leaf":
+        d = proj / ".sdp"; d.mkdir(); realf = c / "real.yaml"; realf.write_text("bad: true\n")
+        (d / "defaults.yaml").symlink_to(realf); env = {}
+    elif kind == "fifo":
+        d = proj / ".sdp"; d.mkdir(); os.mkfifo(d / "defaults.yaml"); env = {}
+    elif kind == "directory":
+        d = proj / ".sdp"; d.mkdir(); (d / "defaults.yaml").mkdir(); env = {}
+    else:
+        d = proj / ".sdp"; d.mkdir(); f = d / "defaults.yaml"; f.write_text("secret: true\n"); f.chmod(0); env = {}
+    try:
+        cd.discover(proj, "defaults.yaml", home_resolver=lambda h=home: h, environ=env)
+    except cd.ConfigDiscoveryError:
+        pass
+    else:
+        raise SystemExit(f"unsafe {kind} did not fail closed")
+
+# Relative XDG is rejected when local candidates are absent; extra CLI args rejected.
+p = tmp / "relative-xdg"; p.mkdir()
+try:
+    cd.discover(p, "defaults.yaml", home_resolver=lambda: real, environ={"XDG_CONFIG_HOME": "relative"})
+except cd.ConfigDiscoveryError:
+    pass
+else:
+    raise SystemExit("relative XDG accepted")
+cp = subprocess.run([sys.executable, str(root / "scripts/config_discovery.py"),
+                     "discover", str(p), "defaults.yaml", str(real)], capture_output=True)
+if cp.returncode == 0:
+    raise SystemExit("production discovery CLI accepted test-home third argument")
+PY
+case "$?" in
+  0) ok "REQ-001..007: shared discovery corpus + HOME/XDG/symlink/FIFO safety passes" ;;
+  *) bad "REQ-001..007: shared discovery corpus failed" ;;
+esac
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

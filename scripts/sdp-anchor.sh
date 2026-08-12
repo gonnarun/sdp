@@ -2,8 +2,8 @@
 # sdp-anchor.sh — anchoring (REQ-P-03).
 # Resolve SDP_ROOT / base_dir / output_locale from a KNOWN location (this
 # script's own path), NOT from ${CLAUDE_PLUGIN_ROOT} (which may not propagate
-# into later body-bash calls, §4.9). Writes ${base_dir}/.sdp_runtime.env that
-# the Stage templates source.
+# into later body-bash calls, §4.9). Writes ${base_dir}/.sdp_runtime.env as
+# agent-readable metadata; no script or stage may source it as shell code.
 #
 # Also: create ${CLAUDE_PROJECT_DIR}/.private if absent and register it in
 # .gitignore, idempotently (REQ-U-07).
@@ -31,23 +31,10 @@ except Exception:
 # --- project dir ---
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-# --- config discovery (REQ-U-05): project config wins; a USER-GLOBAL config is the
-# fallback, so the globally-installed plugin has sane settings even in a project (or a
-# fresh git worktree that ships no committed .sdp/). Precedence, first match wins:
-#   $PROJECT_DIR/.sdp/  ->  $PROJECT_DIR/scripts/sdp/  ->  $XDG_CONFIG_HOME/sdp/  ->  ~/.sdp/
-# Project-local ALWAYS beats global; the no-weakening guard (REQ-U-04) below applies to
-# whichever file is chosen, so a global config can never weaken the security base. ---
-SDP_XDG="${XDG_CONFIG_HOME:-$HOME/.config}/sdp"
-DEFAULTS=""
-for cand in "$PROJECT_DIR/.sdp/defaults.yaml" "$PROJECT_DIR/scripts/sdp/defaults.yaml" \
-            "$SDP_XDG/defaults.yaml" "$HOME/.sdp/defaults.yaml"; do
-  [ -f "$cand" ] && { DEFAULTS="$cand"; break; }
-done
-GATES=""
-for cand in "$PROJECT_DIR/.sdp/gates.yaml" "$PROJECT_DIR/scripts/sdp/gates.yaml" \
-            "$SDP_XDG/gates.yaml" "$HOME/.sdp/gates.yaml"; do
-  [ -f "$cand" ] && { GATES="$cand"; break; }
-done
+# --- config discovery (REQ-U-05): project override -> XDG/passwd-home fallback.
+# config_discovery.py owns precedence and fail-closed path/read validation. ---
+DEFAULTS="$(sdp_cfg_discover "$PROJECT_DIR" defaults.yaml)"
+GATES="$(sdp_cfg_discover "$PROJECT_DIR" gates.yaml)"
 
 # --- no-weakening guard (REQ-U-04) ---
 [ -n "$DEFAULTS" ] && sdp_cfg_check_no_weakening "$DEFAULTS"
@@ -123,6 +110,7 @@ case "$BASE_DIR" in
 esac
 mkdir -p "$BASE_DIR"
 if [ ! -d "$_private_root" ]; then mkdir -p "$_private_root"; fi
+mkdir -p "$PROJECT_DIR/.private"   # gate-config provenance always stays project-local + gitignored
 _gi="$PROJECT_DIR/.gitignore"
 # derive the ignore entry from BASE_DIR (a project may override base_dir away from .private) so the
 # artifact dir — gate logs, review outputs, secret-scan results — is never left committable (REQ-U-07).
@@ -147,13 +135,18 @@ elif [ -e "$_gi" ]; then
 else
   printf '%s\n' "$_ignore_line" > "$_gi"
 fi
+if ! grep -qxF '.private/' "$_gi" 2>/dev/null; then
+  [ -s "$_gi" ] && [ "$(tail -c1 "$_gi" 2>/dev/null; echo x)" != $'\nx' ] && printf '\n' >> "$_gi"
+  printf '.private/\n' >> "$_gi"
+fi
 
-# --- write runtime env (the single source of truth for downstream bash) ---
+# Metadata-only coherence record. Never source this JSON or .sdp_runtime.env.
+python3 "$SDP_SCRIPTS/config_discovery.py" write-provenance "$PROJECT_DIR" "$GATES" >/dev/null
+
+# --- write runtime metadata (agents read values; scripts never source it) ---
 DATE="${SDP_DATE:-$(date +%Y-%m-%d)}"
 RUNTIME_ENV="$BASE_DIR/.sdp_runtime.env"
-# POSIX-portable single-quote wrapping (embedded ' -> '\'') so sourcing is safe under ANY shell (dash/sh too)
-# even for paths with spaces, shell metachars, or non-ASCII bytes — unlike bash's %q which emits $'...' ANSI-C
-# quoting that a strict POSIX shell cannot source.
+# POSIX-portable single-quote wrapping keeps metadata unambiguous for readers.
 _shq() { local s=$1; s=${s//\'/\'\\\'\'}; printf "'%s'" "$s"; }
 {
   printf 'SDP_ROOT=%s\n'           "$(_shq "$SDP_ROOT")"

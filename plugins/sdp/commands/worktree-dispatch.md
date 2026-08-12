@@ -5,7 +5,7 @@ argument-hint: [set of independent tasks]
 
 # /worktree-dispatch — parallel tasks via per-worktree handover
 
-You are dispatching **several independent tasks to run in parallel**, each as a full SDP workflow in its **own git worktree**. This command is a thin dispatch adapter over the shared SDP core: each dispatched session runs the identical Stage 1–8 + two Claude gates at identical strength (REQ-C-01/REQ-C-04). Parallelism must not weaken the gate — GATE_LOG is keyed per (command·scope·artifact) so each worktree has an independent counter and independent round-6 team-review obligation (REQ-C-06).
+You are dispatching **several independent tasks to run in parallel**, each as a full SDP workflow in its **own git worktree**. This command is a thin dispatch adapter over the shared SDP core: each dispatched session runs the identical Stage 1–8 + two Claude gates at identical strength (REQ-C-01/REQ-C-04). Parallelism must not weaken the gate — GATE_LOG is keyed per (command·scope·artifact) so each worktree has an independent counter and an independent team-review obligation from `cadence.escalate_from` onward (REQ-C-06).
 
 Tasks (raw request): **$ARGUMENTS**
 

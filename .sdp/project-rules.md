@@ -13,6 +13,7 @@ For this repo (a bash/markdown plugin) the project-specific review dimensions ar
 - No secrets or credentials hardcoded in scripts; no sensitive data echoed to logs or the gate log.
 - Shell changes pass `shellcheck` and keep `set -u` safety; no unquoted expansion of config/env into a command line.
 - Tests (`tests/smoke.sh`, `tests/gate_integration.sh`, `tests/review_gate.sh`) updated when gate behavior changes.
+- Every change batch audits all four `HOST_DIVERGENT` pairs in `scripts/build_plugin_tree.py` (`commands/sdp.md`, `commands/batch-sdp.md`, `commands/worktree-dispatch.md`, `scripts/run_segment_tmux.sh`) across root and `plugins/sdp/`; generator intentionally skips their content, so `--check` presence is not semantic parity.
 - No new DB/server/migration surface (this repo has none — see below).
 
 Downstream projects replace this section with their own normative dimensions (audit/permission/crypto/migration rules, repeated-mistake list). Stage 4 / Stage 7 cite THIS section, not the illustrative Template.

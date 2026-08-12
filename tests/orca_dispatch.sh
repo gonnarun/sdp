@@ -165,6 +165,21 @@ out="$(SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" bash "$ADAPTER" "$BATCH" "$SEG_I
   && ok "DRYRUN init -> 0, pins Codex agent and prints timeout + state_file" \
   || bad "DRYRUN init (rc=$rc): $out"
 
+# Global-only defaults are effective; project-local remains explicit override.
+GPROJ="$TMP/global-project"; GX="$TMP/global-xdg"; mkdir -p "$GPROJ" "$GX/sdp"
+git -C "$GPROJ" init -q
+git -C "$GPROJ" -c user.name=sdp-test -c user.email=sdp-test@example.invalid commit -q --allow-empty -m init
+printf 'dispatch:\n  default_timeout: 4321\n' > "$GX/sdp/defaults.yaml"
+gout="$(CLAUDE_PROJECT_DIR="$GPROJ" XDG_CONFIG_HOME="$GX" SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" \
+  bash "$ADAPTER" "$BATCH" "$SEG_INIT" init 2>&1)"; grc=$?
+{ [ "$grc" = 0 ] && printf '%s' "$gout" | grep -qF '  timeout       : 4321s'; } \
+  && ok "Orca adapter uses global-only defaults" || bad "Orca global defaults (rc=$grc): $gout"
+mkdir -p "$GPROJ/.sdp"; printf 'dispatch:\n  default_timeout: 8765\n' > "$GPROJ/.sdp/defaults.yaml"
+lout="$(CLAUDE_PROJECT_DIR="$GPROJ" XDG_CONFIG_HOME="$GX" SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" \
+  bash "$ADAPTER" "$BATCH" "$SEG_INIT" init 2>&1)"; lrc=$?
+{ [ "$lrc" = 0 ] && printf '%s' "$lout" | grep -qF '  timeout       : 8765s'; } \
+  && ok "Orca project defaults override global defaults" || bad "Orca local precedence (rc=$lrc): $lout"
+
 SEG_STATUS="$TMP/seg-dryrun-status"; mkdir -p "$SEG_STATUS"
 write_state "$SEG_STATUS" "task_dr" "ctx_dr_123" "$TMP/wt-dryrun" "repoid::$TMP/wt-dryrun" "9999999999"
 out="$(SDP_ORCA_DRYRUN=1 SDP_ORCA_BIN="$NOORCA" bash "$ADAPTER" "$BATCH" "$SEG_STATUS" status 2>&1)"; rc=$?

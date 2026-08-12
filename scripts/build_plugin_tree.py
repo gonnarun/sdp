@@ -161,6 +161,17 @@ def check() -> int:
                 mismatches.append(f"{rel}: missing in root mirror")
             elif not filecmp.cmp(generated, actual, shallow=False):
                 mismatches.append(f"{rel}: root mirror differs from canonical")
+        # HOST_DIVERGENT files are deliberately not generated, but silently
+        # omitting either host copy is never legitimate. Semantic parity remains
+        # a mandatory manual/review checklist item because these pairs differ by
+        # design and byte comparison would erase that distinction.
+        for rel in sorted(HOST_DIVERGENT):
+            canonical = CANONICAL / rel
+            root_copy = ROOT / rel
+            if not canonical.is_file():
+                mismatches.append(f"{rel}: missing canonical host-divergent copy")
+            if not root_copy.is_file():
+                mismatches.append(f"{rel}: missing root host-divergent copy")
         # host-divergent codex manifest must match what the Claude manifest derives
         if not CODEX_MCP.exists():
             mismatches.append(f"{CODEX_MCP.name}: missing (run build to derive it)")
@@ -172,7 +183,10 @@ def check() -> int:
             sys.stderr.write(f"  {line}\n")
         sys.stderr.write("run: python3 scripts/build_plugin_tree.py && git add <paths>\n")
         return 1
-    print(f"regen check OK — {len(written)} generated file(s) match canonical")
+    print(
+        f"regen check OK — {len(written)} generated file(s) match canonical; "
+        f"{len(HOST_DIVERGENT)} host-divergent pair(s) present (manual parity required)"
+    )
     return 0
 
 

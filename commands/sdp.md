@@ -1,5 +1,5 @@
 ---
-description: Run the full SDP staged workflow (Stages 1–8, two codex gates) on a single task, serially, in this session.
+description: Run the full SDP staged workflow (Stages 1–8, two cross-model review gates) on a single task, serially, in this session.
 argument-hint: [task description]
 ---
 
@@ -11,13 +11,13 @@ Task (raw request): **$ARGUMENTS**
 
 ## 1. Anchor (mandatory — REQ-P-03)
 
-Run the anchor so every later Bash call and `review_gate.py` can resolve `SDP_ROOT` / `base_dir` / locale from a written runtime env (do not rely on `${CLAUDE_PLUGIN_ROOT}` propagating into later Bash calls — §4.9):
+Run the anchor so the agent can read `SDP_ROOT` / `base_dir` / locale from written metadata (do not rely on `${CLAUDE_PLUGIN_ROOT}` propagating into later Bash calls, and never source the metadata as shell code — §4.9):
 
 ```bash
 CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}" bash "${CLAUDE_PLUGIN_ROOT}/scripts/sdp-anchor.sh"
 ```
 
-This prints the runtime-env path (`${base_dir}/.sdp_runtime.env`) and auto-creates `.private/` + registers it in `.gitignore`. Confirm it succeeded before proceeding.
+This prints the metadata path (`${base_dir}/.sdp_runtime.env`) and auto-creates `.private/` + registers it in `.gitignore`. Read required values as data, pass them explicitly to later commands, and confirm anchoring succeeded.
 
 ## 2. Load the core and follow it
 
@@ -26,7 +26,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/core/SDP.md` and execute it exactly: Stages 1–8, t
 ## 3. Orchestration specific to /sdp
 
 - **Serial, in-session.** No segment splitting, no parallel worktrees, no delegation — run every stage in this session in order.
-- **Fast-path for small tasks.** For a small, low-impact task that meets the core's "Exception — direct implementation" criteria (obvious one/two-line fix, complete user spec, or explicit "start now"), you MAY collapse stages — but still record the one-line note the core requires, and the two codex gates (Stage 4 plan, Stage 7 test result) still apply to any code change. Never skip a gate to save time.
-- **Attended mode** is the default (`CODEX_GATE_MODE=attended`); this permits the human override escape hatch and `warn_flag_continue` on `INFRA_ERROR`.
+- **Fast-path for small tasks.** For a small, low-impact task that meets the core's "Exception — direct implementation" criteria (obvious one/two-line fix, complete user spec, or explicit "start now"), you MAY collapse stages — but still record the one-line note the core requires, and the two cross-model review gates (Stage 4 plan, Stage 7 test result) still apply to any code change. Never skip a gate to save time.
+- **Gate mode** comes from the anchor-selected `gates.yaml` (`mode:`), never from the environment; with no config at any discovery tier the built-in default is `unattended`. Attended permits the human `SDP_GATE_OVERRIDE` escape hatch and `warn_flag_continue` on `INFRA_ERROR`; unattended pauses and notifies instead. Read the selected value before assuming a stage may advance past an `INFRA_ERROR` — and note a user-global `gates.yaml` sets it for every project that ships no local override.
 
 Begin at Stage 1 (Interview) using the `AskUserQuestion` tool, unless the user said "just build it" / "start now" (then go to Stage 2), per `core/SDP.md`.

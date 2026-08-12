@@ -32,6 +32,57 @@ fi
 # 4. README surfaces the not-yet-implemented limitations to users.
 grep -qi 'Known limitations' README.md && ok "README has a Known limitations section" || bad "README missing Known limitations section"
 
+# 5. Global-harness contract stays aligned across source and installed payload.
+for f in README.md plugins/sdp/README.md; do
+  grep -qF 'user-global harness' "$f" \
+    && grep -qF 'project `.sdp/gates.yaml` only for a deliberate override' "$f" \
+    && ok "$f documents global defaults + explicit project override" \
+    || bad "$f lost global-harness precedence guidance"
+  grep -qF 'CLAUDE_GATE_MODEL' "$f" \
+    && bad "$f advertises removed CLAUDE_GATE_MODEL env selection" \
+    || ok "$f has no stale reviewer-model env knob"
+  grep -qF 'affects both Codex- and Claude Code-hosted workflows' "$f" \
+    && grep -qF 'legacy `model` is passed to Claude, Codex, and agy' "$f" \
+    && ok "$f warns about cross-host global gate policy/model blast radius" \
+    || bad "$f misses cross-host global gate warning"
+done
+
+for f in scripts/sdp-anchor.sh scripts/run_segment_tmux.sh scripts/orca_dispatch.sh scripts/sdp-regression.sh \
+         plugins/sdp/scripts/sdp-anchor.sh plugins/sdp/scripts/run_segment_tmux.sh \
+         plugins/sdp/scripts/orca_dispatch.sh plugins/sdp/scripts/sdp-regression.sh; do
+  grep -qF 'sdp_cfg_discover' "$f" \
+    && ok "$f delegates config discovery" || bad "$f still lacks canonical discovery"
+done
+for f in scripts/review_gate.py plugins/sdp/scripts/review_gate.py; do
+  grep -qF 'config_discovery.discover' "$f" \
+    && grep -qF '_read_review_checklist' "$f" \
+    && ok "$f uses global discovery + checklist enforcement" \
+    || bad "$f lost canonical gates/checklist behavior"
+done
+
+if grep -rqE 'for .*\.sdp/(defaults|gates)\.yaml' scripts plugins/sdp/scripts 2>/dev/null; then
+  bad "runtime scripts contain a local-only inline config loop"
+else
+  ok "runtime scripts contain no local-only inline config loop"
+fi
+for f in core/SDP.md plugins/sdp/core/SDP.md core/Stage4_design_plan.md plugins/sdp/core/Stage4_design_plan.md; do
+  grep -qF 'never source' "$f" \
+    && ok "$f marks runtime env metadata-only" || bad "$f may imply runtime-env sourcing"
+done
+for f in commands/sdp.md plugins/sdp/commands/sdp.md; do
+  grep -qF 'never source the metadata as shell code' "$f" \
+    && ! grep -qF 'two Claude gates' "$f" \
+    && ! grep -qF 'two codex gates' "$f" \
+    && ok "$f keeps command metadata-only + cross-model wording" \
+    || bad "$f has stale host command wording"
+done
+for f in .sdp/project-rules.md plugins/sdp/.sdp/project-rules.md; do
+  grep -qF 'all four `HOST_DIVERGENT` pairs' "$f" \
+    && grep -qF 'generator intentionally skips their content' "$f" \
+    && ok "$f requires per-batch host-divergent parity audit" \
+    || bad "$f misses host-divergent parity checklist"
+done
+
 # =============================================================================
 # ADR-G10's doc guards (i)-(ix), plus guard (x) for the BLOCK output contract.
 # These run against BOTH TREES. Until now this file read only the root README,

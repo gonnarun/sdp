@@ -19,6 +19,9 @@ CLAUDE_MANIFEST="$PLUGIN/.claude-plugin/plugin.json"  # moved under the plugin r
 
 python3 -m json.tool "$MANIFEST" >/dev/null 2>&1 && ok "Codex plugin manifest is valid JSON" || bad "Codex plugin manifest invalid JSON"
 python3 -m json.tool "$CLAUDE_MANIFEST" >/dev/null 2>&1 && ok "Claude plugin manifest is valid JSON" || bad "Claude plugin manifest invalid JSON"
+[ -f "$PLUGIN/scripts/config_discovery.py" ] \
+  && ok "Claude/Codex plugin payload ships config_discovery.py" \
+  || bad "plugin payload missing config_discovery.py"
 SKILLS="$(python3 -c 'import json;print(json.load(open("plugins/sdp/.codex-plugin/plugin.json")).get("skills",""))' 2>/dev/null)"
 [ "$SKILLS" = "./skills/" ] && ok "Codex plugin manifest skills path = ./skills/" || bad "Codex plugin skills path = '$SKILLS'"
 

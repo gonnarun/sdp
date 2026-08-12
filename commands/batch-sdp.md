@@ -23,11 +23,7 @@ Do a Stage 1 interview once for the whole scope (via `AskUserQuestion`), then de
 
 ## 3. Execute each segment through the SDP core
 
-For every segment, run the full workflow in `${CLAUDE_PLUGIN_ROOT}/core/SDP.md` (Stages 1–8, both gates, fix loop). Because this is unattended, set:
-
-```bash
-export CODEX_GATE_MODE=unattended    # INFRA_ERROR -> pause/notify; human override disabled
-```
+For every segment, run the full workflow in `${CLAUDE_PLUGIN_ROOT}/core/SDP.md` (Stages 1–8, both gates, fix loop). Unattended execution is a `gates.yaml` setting (`mode: unattended`) resolved by the anchor, **not** an environment variable — confirm it is what the anchor selected before dispatching. Under it, `INFRA_ERROR` pauses the segment and notifies the user instead of being treated as content approval, and the human override is refused.
 
 **Execution engine (config-selectable — REQ-C-03):**
 
@@ -36,6 +32,6 @@ export CODEX_GATE_MODE=unattended    # INFRA_ERROR -> pause/notify; human overri
 
 ## 4. Unattended safety
 
-Under unattended execution keep the core's guarantees: honor the gate halts (`.halt`, `max_block`, escalation team markers), never self-authorize a `CODEX_GATE_OVERRIDE` (the token file is human-provisioned and refused in unattended mode), and stop + report if a segment cannot pass its gate. If the gate escalates and no valid `TEAM_REVIEW`/`TEAM_CARRY` marker exists, **stop and report**. Run `review_gate.py prepare-marker <artifact>` and hand the request file to the human. Never append a marker to a gate log yourself — that is a human action, and `record-marker` will refuse without a terminal and a token.
+Under unattended execution keep the core's guarantees: honor the gate halts (`.halt`, `max_block`, escalation team markers), never self-authorize an `SDP_GATE_OVERRIDE` (the token file is human-provisioned and refused in unattended mode), and stop + report if a segment cannot pass its gate. If the gate escalates and no valid `TEAM_REVIEW`/`TEAM_CARRY` marker exists, **stop and report**. Run `review_gate.py prepare-marker <artifact>` and hand the request file to the human. Never append a marker to a gate log yourself — that is a human action, and `record-marker` will refuse without a terminal and a token.
 
 > The tmux engine now launches Codex workers and uses Claude only for review gates. Real headless Codex sessions are not exercised in CI; see `docs/KNOWN_GAPS.md`.

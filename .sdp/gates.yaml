@@ -6,8 +6,19 @@ codex_timeout: 480              # codex reviewer wall cap (s); clamped to GATE_W
 agy_timeout: 30                 # was 300 — deliberate for this repo (ADR-B03): agy is a BLOCK signal here
 require_primary_verdict: false  # true => an agy-fallback ALLOW is refused as INFRA_ERROR (ADR-G17)
 cadence:
-  escalate_from: 6              # planner-solo hard-blocked from this cumulative BLOCK
-  review_on: even               # 6,8,10,12 -> TEAM_REVIEW
+  escalate_from: 8              # planner-solo hard-blocked from this cumulative BLOCK
+  review_on: even               # anchor parity picks the kind; see marker_span
+  relaxation_ack: marker-fatigue-2026-08-12-user-approved-8-4
+                                # REQUIRED: escalate_from/marker_span are past the
+                                # shipped baseline (6/1), so sdp-regression.sh refuses
+                                # to certify them unless the relaxation is declared
+                                # here. Absence = FAIL, never a silent wider ceiling.
+  marker_span: 4                # one accepted marker discharges this many consecutive
+                                # rounds. With escalate_from 8 / max_block 13 the
+                                # windows are 8-11 and 12-13, so exactly TWO markers
+                                # cover the whole escalation range. Both anchors are
+                                # even, so both are TEAM_REVIEW (outputs= required)
+                                # and TEAM_CARRY never falls due here — intended.
 halt:
   max_block: 13                 # 12th review executes; 13th entry halts (D-07)
   pivot_cap: 2

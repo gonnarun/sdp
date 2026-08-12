@@ -8,7 +8,10 @@ agy_timeout: 30                 # was 300 — deliberate for this repo (ADR-B03)
 require_primary_verdict: false  # true => an agy-fallback ALLOW is refused as INFRA_ERROR (ADR-G17)
 cadence:
   escalate_from: 6              # planner-solo hard-blocked from this cumulative BLOCK
-  review_on: even               # 6,8,10,12 -> TEAM_REVIEW
+  review_on: even               # anchor parity picks the kind: even -> TEAM_REVIEW
+  marker_span: 1                # rounds ONE accepted marker discharges. 1 = a marker
+                                # per round (the historical rule). Raising it is a
+                                # deliberate relaxation; sdp-regression.sh caps it at 4.
 halt:
   max_block: 13                 # 12th review executes; 13th entry halts (D-07)
   pivot_cap: 2

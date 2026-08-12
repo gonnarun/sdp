@@ -7,6 +7,7 @@
 set -u
 SDP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN="$SDP_ROOT/scripts/run_segment_tmux.sh"
+RUN_PLUGIN="$SDP_ROOT/plugins/sdp/scripts/run_segment_tmux.sh"
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
@@ -58,6 +59,25 @@ printf '%s' "$out" | grep -q "core_file .*core/SDP.md" && ok "core_file resolves
 { printf '%s' "$out" | grep -qF 'worker_command: codex --ask-for-approval never --sandbox danger-full-access -C ' \
     && ! printf '%s' "$out" | grep -qF 'claude --permission-mode'; } \
   && ok "worker identity: dry-run launches Codex, never Claude" || bad "worker command is not Codex-only"
+
+# Global-only defaults must drive both host-divergent tmux entrypoints; local override wins.
+GPROJ="$TMP/global-project"; GX="$TMP/global-xdg"; mkdir -p "$GPROJ" "$GX/sdp"
+printf 'dispatch:\n  session_prefix: global-seg\n  default_timeout: 4321\n' > "$GX/sdp/defaults.yaml"
+for runner in "$RUN" "$RUN_PLUGIN"; do
+  gout="$(CLAUDE_PROJECT_DIR="$GPROJ" XDG_CONFIG_HOME="$GX" SDP_TMUX_DRYRUN=1 \
+    bash "$runner" "$TMP/batch" "$TMP/seg" init 2>/dev/null)"
+  { printf '%s' "$gout" | grep -q 'session_prefix: global-seg' \
+    && printf '%s' "$gout" | grep -q 'timeout       : 4321'; } \
+    || bad "global defaults ignored by $runner"
+done
+ok "global defaults drive root + plugin tmux entrypoints"
+mkdir -p "$GPROJ/.sdp"
+printf 'dispatch:\n  session_prefix: local-seg\n  default_timeout: 8765\n' > "$GPROJ/.sdp/defaults.yaml"
+lout="$(CLAUDE_PROJECT_DIR="$GPROJ" XDG_CONFIG_HOME="$GX" SDP_TMUX_DRYRUN=1 \
+  bash "$RUN" "$TMP/batch" "$TMP/seg" init 2>/dev/null)"
+{ printf '%s' "$lout" | grep -q 'session_prefix: local-seg' \
+  && printf '%s' "$lout" | grep -q 'timeout       : 8765'; } \
+  && ok "tmux project defaults override global defaults" || bad "tmux local precedence lost"
 out2="$(SDP_SESSION_PREFIX=myproj SDP_TMUX_DRYRUN=1 bash "$RUN" "$TMP/batch" "$TMP/seg" init 2>/dev/null)"
 printf '%s' "$out2" | grep -q 'session_prefix: myproj' && ok "SDP_SESSION_PREFIX override honored" || bad "prefix override"
 # illegal prefix rejected -> falls back to sdp-seg

@@ -7,9 +7,10 @@ ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL - %s\n' "$1"; }
 
 TMP="$(mktemp -d -t sdp_mcp_test.XXXXXX)"; trap 'rm -rf "$TMP"' EXIT
-PROJ="$TMP/project"; BIN="$TMP/bin"
-mkdir -p "$PROJ" "$BIN"
+PROJ="$TMP/project"; BIN="$TMP/bin"; GX="$TMP/xdg"
+mkdir -p "$PROJ" "$BIN" "$GX/sdp"
 printf 'plan body\n' > "$PROJ/plan.md"
+printf 'model: mcp-global-model\n' > "$GX/sdp/gates.yaml"
 
 cat > "$BIN/claude" <<'STUB'
 #!/usr/bin/env bash
@@ -29,7 +30,7 @@ chmod +x "$BIN/agy"
 # harness (--entry server), which binds the stub resolver in-child via argv.
 RESOLVER="$TMP/resolver.json"
 printf '{"claude": "%s", "agy": "%s"}\n' "$BIN/claude" "$BIN/agy" > "$RESOLVER"
-export SDP_ROOT PROJ BIN RESOLVER
+export SDP_ROOT PROJ BIN RESOLVER XDG_CONFIG_HOME="$GX"
 python3 <<'PY'
 import json
 import os
@@ -108,13 +109,16 @@ call = recv()["result"]
 text = call["content"][0]["text"]
 assert call["isError"] is False, call
 assert text.startswith("ALLOW: mcp claude ok"), text
+audit = os.path.join(proj, ".private", "sdp-artifacts", "gate-audit.ndjson")
+row = json.loads(open(audit, encoding="utf-8").read().splitlines()[-1])
+assert row["config_source"] == os.path.realpath(os.path.join(os.environ["XDG_CONFIG_HOME"], "sdp", "gates.yaml")), row
 
 proc.stdin.close()
 proc.wait(timeout=5)
 assert proc.returncode == 0, proc.returncode
 PY
 rc=$?
-[ "$rc" -eq 0 ] && ok "MCP initialize/list/call works" || bad "MCP smoke failed"
+[ "$rc" -eq 0 ] && ok "MCP initialize/list/call + global gates discovery works" || bad "MCP smoke failed"
 
 # The root/canonical server cmp was deleted at P11: it asserted a byte-identity
 # that Option A collapses (the root mirror is a P12 deletion target), and it
