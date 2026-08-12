@@ -130,6 +130,17 @@ cs=rows[-1].get("config_source") or ""
 sys.exit(0 if cs.endswith(".sdp/gates.yaml") else 1)' "$AUD" \
   && ok "audit row records config_source (the resolved gates.yaml)" || bad "config_source missing"
 
+# Global-only gates use the same state machine and audit their actual source.
+GPROJ="$TMP/global-proj"; GX="$TMP/global-xdg"; mkdir -p "$GPROJ" "$GX/sdp"
+printf 'plan\n' > "$GPROJ/plan.md"
+printf 'mode: attended\nhalt:\n  max_block: 13\n' > "$GX/sdp/gates.yaml"
+set_claude_verdict "ALLOW: global config"
+XDG_CONFIG_HOME="$GX" H --cwd "$GPROJ" --reviewer claude review "$GPROJ/plan.md" >/dev/null 2>&1
+GAUD="$GPROJ/.private/sdp-artifacts/gate-audit.ndjson"
+gpath="$(cd "$GX/sdp" && pwd -P)/gates.yaml"
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); raise SystemExit(0 if r.get("config_source")==sys.argv[2] else 1)' "$GAUD" "$gpath" \
+  && ok "global-only gate config_source recorded by integration path" || bad "global integration config_source missing"
+
 # ---- V6: a git worktree (.git is a FILE) resolves the worktree root ----------
 WT="$TMP/wt"; mkdir -p "$WT"
 printf 'gitdir: /elsewhere/.git/worktrees/wt\n' > "$WT/.git"; printf 'plan\n' > "$WT/plan.md"
@@ -449,6 +460,218 @@ a_sub="$(H --cwd "$TMP/anch/sub" --print-state-path "$TMP/anch/sub/plan.md")"
   && printf '%s' "$a_sub"  | grep -q '/anch/sub/.private/sdp-artifacts/gate/'; } \
   && ok "T31: _audit_base still follows the --cwd-derived root (unchanged; the hole stays open)" \
   || bad "T31: _audit_base anchoring changed (root=$a_root sub=$a_sub)"
+
+# ---- T32-T39: cadence.marker_span -- one marker discharges a whole window ----
+# The window is decided by the LOG's own structure (blocks recorded after the
+# marker), never by a field the marker carries, so these drive the real gate
+# rather than calling _validate_marker directly.
+spangates() {   # $1 = project dir, $2 = escalate_from, $3 = marker_span
+  printf 'halt:\n  max_block: 13\n  pivot_cap: 2\ncadence:\n  escalate_from: %s\n  review_on: even\n  marker_span: %s\nmode: unattended\n' \
+    "$2" "$3" > "$1/.sdp/gates.yaml"
+}
+mkspan() {   # $1 = name, $2 = escalate_from, $3 = span, $4 = BLOCK rounds to drive
+  local p="$TMP/$1" i=1
+  mkdir -p "$p/.sdp"; printf 'plan\n' > "$p/plan.md"
+  spangates "$p" 99 1          # park escalation out of reach while seeding blocks
+  while [ "$i" -le "$4" ]; do
+    set_claude_verdict "BLOCK: $1 r$i"
+    H --cwd "$p" --reviewer claude review "$p/plan.md" >/dev/null 2>&1
+    i=$((i + 1))
+  done
+  spangates "$p" "$2" "$3"
+  printf 'evidence\n' > "$p/out1.md"
+  printf '%s' "$p"
+}
+addmarker() {   # $1 = project dir, $2 = round= value ('' omits the token), $3 = 'nosince'
+  local log rnd="" since=""
+  log="$(plog2 "$1")"
+  [ -n "${2:-}" ] && rnd="round=$2 "
+  # Mirror what record_marker writes: since= pins freshness to the BLOCK that
+  # OPENED the window. Without it the baseline tracks the newest BLOCK, which is
+  # exactly what makes a span>1 marker read as stale on its second round.
+  [ "${3:-}" != "nosince" ] \
+    && since="since=$(grep '^BLOCK_ATTEMPT ' "$log" | tail -1 | awk '{print $3}') "
+  printf 'TEAM_REVIEW %s %s%sroster=alice,bob outputs=out1.md decision=continue\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rnd" "$since" >> "$log"
+}
+
+# T32-T34: span=4 -- the marker recorded at the anchor covers anchor..anchor+3.
+P="$(mkspan spanA 8 4 8)"                      # count == 8 == escalate_from
+addmarker "$P" 8
+# Four gate calls fall inside the window (blocks-since-marker 0,1,2,3); each ends
+# in a content BLOCK, which is what advances the counter toward expiry.
+for r in 1 2 3 4; do
+  set_claude_verdict "BLOCK: spanA covered $r"
+  out="$(gate2 "$P" 2>&1)"; rc=$?
+  { [ "$rc" -eq 1 ] && ! printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+    && ok "T32.$r: span=4 marker still covers round $((7 + r)) (content BLOCK, not an escalation refusal)" \
+    || bad "T32.$r: covered round $((7 + r)) was refused for the marker (rc=$rc $out)"
+done
+# The 4th BLOCK takes blocks-since-marker to 4 == span: the window is spent.
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T33: span=4 marker EXPIRES after covering its 4 rounds" \
+  || bad "T33: expired marker still discharged the escalation (rc=$rc $out)"
+
+# T34: a fresh marker opens the next window and the gate proceeds again. The new
+# window demands NEW evidence: out1.md must post-date the BLOCK that opened it,
+# which is the same freshness rule the first window enforced.
+printf 'evidence for window 2\n' > "$P/out1.md"
+addmarker "$P" 12
+set_claude_verdict "ALLOW: next-window"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW:'; } \
+  && ok "T34: a new marker opens the next window" \
+  || bad "T34: next-window marker rejected (rc=$rc $out)"
+
+# T35: span=1 is byte-for-byte the pre-span rule -- the very next attempt retires it.
+P="$(mkspan spanB 2 1 2)"
+addmarker "$P" 2
+set_claude_verdict "BLOCK: spanB consumes the marker"
+gate2 "$P" >/dev/null 2>&1                     # count 2 -> 3, marker spent
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T35: span=1 retires the marker on the next attempt (pre-span behaviour)" \
+  || bad "T35: span=1 marker outlived one round (rc=$rc $out)"
+
+# T36: at span=1 a legacy marker carrying NO round= is still honoured -- real logs
+# hold live ones from grammars predating marker_span, and refusing them would
+# invalidate a live escalation (the hazard NC-13 names).
+P="$(mkspan spanC 2 1 2)"
+addmarker "$P" ""                              # no round= token at all
+set_claude_verdict "ALLOW: legacy-marker"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW:'; } \
+  && ok "T36: at span=1 a legacy marker with no round= is still accepted" \
+  || bad "T36: legacy round=-less marker was invalidated (rc=$rc $out)"
+
+# T36a: at span>1 the token is REQUIRED. A project opting into windows postdates the
+# marker_span key, so no legacy marker can be live there -- and tolerating the
+# absence is one of the two legs that let ONE round=-less marker match every
+# window (codex review HIGH-2, leg b).
+P="$(mkspan spanC1 2 4 2)"
+addmarker "$P" ""
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T36a: at span>1 a round=-less marker is refused (fail-closed)" \
+  || bad "T36a: round=-less marker accepted under span>1 (rc=$rc $out)"
+
+# T36b: a marker with no since= under span>1 keeps the OLD moving baseline, so it
+# goes stale once a newer BLOCK lands. Fail-closed, and recorded rather than
+# silently tolerated: only pre-span grammars lack the token.
+P="$(mkspan spanC2 2 4 2)"
+addmarker "$P" 2 nosince
+set_claude_verdict "BLOCK: spanC2 first covered round"
+gate2 "$P" >/dev/null 2>&1                     # marker consumed once, counter moves
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T36b: a since=-less marker cannot span (stale evidence, fail-closed)" \
+  || bad "T36b: since=-less marker spanned on the moving baseline (rc=$rc $out)"
+
+# T37: a PRESENT but wrong round= is refused -- defence in depth over the counter.
+P="$(mkspan spanD 2 4 2)"
+addmarker "$P" 99
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T37: a marker whose round= names another window is refused" \
+  || bad "T37: wrong-window marker accepted (rc=$rc $out)"
+
+# T38: PIVOT_RESET must not leave its own marker alive across the reset -- else a
+# span marker recorded pre-pivot would still be covering rounds after it.
+P="$(mkspan spanE 2 4 2)"
+printf 'TEAM_REVIEW %s round=2 roster=alice,bob outputs=out1.md decision=pivot\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$(plog2 "$P")"
+set_claude_verdict "BLOCK: pivot-then-block"
+gate2 "$P" >/dev/null 2>&1                     # PIVOT_RESET + RESET, then BA 1
+set_claude_verdict "BLOCK: climb 2"
+gate2 "$P" >/dev/null 2>&1                     # BA 2 -> back at escalate_from
+set_claude_verdict "ALLOW: should-not-run"
+out="$(gate2 "$P" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qi 'not performed\|planner-solo'; } \
+  && ok "T38: a pivot's own marker does not survive its PIVOT_RESET" \
+  || bad "T38: pre-pivot marker still covered a post-reset round (rc=$rc $out)"
+
+# T40: codex review HIGH-2, leg (a) -- verbatim reproduction. Malformed lines take
+# the _parse_log `else` branch, which advances `count` (and therefore `prior`, and
+# therefore the window anchor). If they do not ALSO age blocks_since_marker, four
+# garbage lines walk an 8-round log to anchor 12 while the window-8 marker still
+# reads as live, discharging a window it never covered. The invariant asserted here
+# is TOTAL: count and blocks_since_marker move together, whichever branch moves them.
+python3 - "$SDP_ROOT/scripts" "$TMP" <<'PY' && ok "T40: malformed lines age the marker exactly as they age the counter (HIGH-2a)" \
+  || bad "T40: malformed lines advance count without aging blocks_since_marker"
+import sys, pathlib
+sys.path.insert(0, sys.argv[1])
+import review_gate as rg
+log = pathlib.Path(sys.argv[2]) / "high2a.log"
+lines = [f"BLOCK_ATTEMPT {i} 2026-08-12T00:0{i%10}:00.000000Z hash{i}" for i in range(1, 9)]
+lines.append("TEAM_REVIEW 2026-08-12T00:10:00.000000Z round=8 since=2026-08-12T00:08:00.000000Z "
+             "roster=alice,bob outputs=out1.md decision=continue")
+lines += [f"garbage line {j}" for j in range(4)]
+log.write_text("\n".join(lines) + "\n")
+st = rg._parse_log(log)
+# count moved 8 -> 12, so the marker must have aged by the same 4.
+ok = (st.count == 12 and st.blocks_since_marker == 4
+      and rg._marker_anchor(st.count, 8, 4) == 12
+      and not (st.blocks_since_marker < 4))          # window is spent, not live
+sys.exit(0 if ok else 1)
+PY
+
+# T41: the same log, one round earlier, still INSIDE the window -- proves T40 pins a
+# boundary and not merely "malformed lines kill markers".
+python3 - "$SDP_ROOT/scripts" "$TMP" <<'PY' && ok "T41: 3 malformed lines leave the window live (boundary, not blanket invalidation)" \
+  || bad "T41: sub-span malformed lines wrongly retired the marker"
+import sys, pathlib
+sys.path.insert(0, sys.argv[1])
+import review_gate as rg
+log = pathlib.Path(sys.argv[2]) / "high2a_boundary.log"
+lines = [f"BLOCK_ATTEMPT {i} 2026-08-12T00:0{i%10}:00.000000Z hash{i}" for i in range(1, 9)]
+lines.append("TEAM_REVIEW 2026-08-12T00:10:00.000000Z round=8 since=2026-08-12T00:08:00.000000Z "
+             "roster=alice,bob outputs=out1.md decision=continue")
+lines += [f"garbage line {j}" for j in range(3)]
+log.write_text("\n".join(lines) + "\n")
+st = rg._parse_log(log)
+sys.exit(0 if (st.count == 11 and st.blocks_since_marker == 3
+               and rg._marker_anchor(st.count, 8, 4) == 8
+               and st.blocks_since_marker < 4) else 1)
+PY
+
+# T42: codex review HIGH-1 -- the combination invariant the three scalar ceilings
+# miss. Both triples below sit inside the sanctioned envelope yet make EVERY window
+# anchor a TEAM_CARRY, so fresh outputs= evidence is never demanded anywhere in the
+# escalation range. Asserted against the engine's own anchor/kind functions.
+python3 - "$SDP_ROOT/scripts" <<'PY' && ok "T42: all-TEAM_CARRY cadences are identifiable from (escalate_from, span, review_on) (HIGH-1)" \
+  || bad "T42: the all-CARRY combination detector drifted"
+import sys
+sys.path.insert(0, sys.argv[1])
+import review_gate as rg
+def kinds(ef, span, ro, mb=13):
+    # HALF-OPEN: review_gate returns the max_block halt before the escalation block
+    # (`if prior >= max_block: ... return`), so round == mb never reaches the
+    # cadence and must not count toward the invariant (codex review, F2).
+    return {rg._need_marker(rg._marker_anchor(p, ef, span), ro) for p in range(ef, mb)}
+bad_cases = [(7, 4, "even"), (8, 4, "odd"), (7, 1, "even", 8), (6, 1, "odd", 7)]
+good_cases = [(8, 4, "even"), (6, 1, "even"), (6, 1, "odd")]
+ok = (all("TEAM_REVIEW" not in kinds(*c) for c in bad_cases)
+      and all("TEAM_REVIEW" in kinds(*c) for c in good_cases))
+sys.exit(0 if ok else 1)
+PY
+
+# T39: the anchor table itself, over the shipped escalate_from=8 / span=4 window.
+python3 - "$SDP_ROOT/scripts" <<'PY' && ok "T39: _marker_anchor windows are 8-11 and 12-13 at escalate_from=8/span=4" \
+  || bad "T39: anchor table drifted"
+import sys
+sys.path.insert(0, sys.argv[1])
+import review_gate as rg
+want = {8: 8, 9: 8, 10: 8, 11: 8, 12: 12, 13: 12}
+got = {p: rg._marker_anchor(p, 8, 4) for p in want}
+ident = all(rg._marker_anchor(p, 6, 1) == p for p in range(6, 14))
+sys.exit(0 if got == want and ident else 1)
+PY
 
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

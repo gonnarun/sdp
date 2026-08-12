@@ -19,16 +19,19 @@ CMD="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("comma
 [ "$CMD" = "./commands" ] && ok "manifest commands = ./commands" || bad "manifest commands key = '$CMD' (expected ./commands)"
 [ -d "plugins/sdp/${CMD#./}" ] && ok "commands/ dir resolves" || bad "commands/ dir missing (dangling manifest ref)"
 
-# 2. the three SDP adapters exist, with well-formed frontmatter and non-empty body
-for c in sdp batch-sdp worktree-dispatch; do
-  f="commands/$c.md"
-  if [ ! -f "$f" ]; then bad "$f missing"; continue; fi
-  fm="$(awk 'NR==1{if($0!="---") exit 1} NR>1 && $0=="---"{print "ok"; exit 0}' "$f" && echo y)"
-  [ -n "$fm" ] && ok "$f has well-formed --- frontmatter ---" || bad "$f frontmatter malformed"
-  grep -q '^description:' "$f" && ok "$f has description" || bad "$f missing description"
-  # thin-adapter contract: drives the anchor + the shared core
-  grep -q 'sdp-anchor.sh' "$f" && ok "$f drives sdp-anchor.sh" || bad "$f does not call the anchor"
-  grep -q 'core/SDP.md'   "$f" && ok "$f drives core/SDP.md"   || bad "$f does not load the core"
+# 2. all three host-divergent SDP adapters exist in BOTH host trees, with
+# well-formed frontmatter and the thin-adapter contract. Generator skips these.
+for tree in commands plugins/sdp/commands; do
+  for c in sdp batch-sdp worktree-dispatch; do
+    f="$tree/$c.md"
+    if [ ! -f "$f" ]; then bad "$f missing"; continue; fi
+    fm="$(awk 'NR==1{if($0!="---") exit 1} NR>1 && $0=="---"{print "ok"; exit 0}' "$f" && echo y)"
+    [ -n "$fm" ] && ok "$f has well-formed --- frontmatter ---" || bad "$f frontmatter malformed"
+    grep -q '^description:' "$f" && ok "$f has description" || bad "$f missing description"
+    # thin-adapter contract: drives the anchor + the shared core
+    grep -q 'sdp-anchor.sh' "$f" && ok "$f drives sdp-anchor.sh" || bad "$f does not call the anchor"
+    grep -q 'core/SDP.md'   "$f" && ok "$f drives core/SDP.md"   || bad "$f does not load the core"
+  done
 done
 
 # 3. utility commands exist, with well-formed frontmatter

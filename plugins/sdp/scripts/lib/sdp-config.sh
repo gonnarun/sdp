@@ -9,6 +9,16 @@
 # colonless-line rejection); tests/config_safety.sh asserts they agree
 # (REQ-026/027 parity test).
 
+# sdp_cfg_discover PROJECT_DIR BASENAME -> selected path or empty.
+# Canonical precedence/symlink/read safety lives in config_discovery.py so every
+# shell consumer and the Python gate use one engine. Errors propagate fail-closed.
+sdp_cfg_discover() {
+  [ "$#" -eq 2 ] || { printf 'CONFIG ERROR: sdp_cfg_discover requires PROJECT_DIR BASENAME\n' >&2; return 2; }
+  local scripts_dir
+  scripts_dir="${SDP_SCRIPTS:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+  python3 "$scripts_dir/config_discovery.py" discover "$1" "$2"
+}
+
 # sdp_cfg_get FILE DOTTED_KEY  -> prints the scalar value (empty if absent)
 # Supports: "top" and any depth of "parent.child.grandchild" via an indent
 # stack (NOT depth=int(indent/2), which assumed exactly 2-space indents and

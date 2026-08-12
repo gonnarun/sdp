@@ -15,16 +15,34 @@ grep -q '^OUTPUT_LOCALE=' "$rt" && ok "output_locale resolved" || bad "output_lo
 
 # global config fallback (REQ-U-05): no project .sdp/, a user-global XDG config is used.
 GX="$(mktemp -d -t sdp_xdg.XXXXXX)"; PJ="$(mktemp -d -t sdp_proj.XXXXXX)"
-mkdir -p "$GX/sdp"; cp "$SDP_ROOT/.sdp/defaults.yaml" "$GX/sdp/"
+mkdir -p "$GX/sdp"; cp "$SDP_ROOT/.sdp/defaults.yaml" "$GX/sdp/"; cp "$SDP_ROOT/.sdp/gates.yaml" "$GX/sdp/"
 grt="$(CLAUDE_PROJECT_DIR="$PJ" XDG_CONFIG_HOME="$GX" bash "$SDP_ROOT/scripts/sdp-anchor.sh" 2>/dev/null)"
-{ [ -f "$grt" ] && grep -qF "$GX/sdp/defaults.yaml" "$grt"; } \
-  && ok "global XDG config used when project ships no .sdp/" || bad "global config fallback"
+{ [ -f "$grt" ] && grep -qF "$(cd "$GX/sdp" && pwd -P)/defaults.yaml" "$grt" \
+    && grep -qF "$(cd "$GX/sdp" && pwd -P)/gates.yaml" "$grt" \
+    && [ -s "$PJ/.private/sdp-config-provenance.json" ]; } \
+  && ok "global XDG defaults/gates used + provenance written" || bad "global config fallback/provenance"
+# Claude Code executes the installed plugin copy, not the root mirror.
+PJC="$(mktemp -d -t sdp_claude_proj.XXXXXX)"
+crt="$(CLAUDE_PROJECT_DIR="$PJC" XDG_CONFIG_HOME="$GX" bash "$SDP_ROOT/plugins/sdp/scripts/sdp-anchor.sh" 2>/dev/null)"
+{ [ -f "$crt" ] && grep -qF "$SDP_ROOT/plugins/sdp" "$crt" \
+    && grep -qF "$(cd "$GX/sdp" && pwd -P)/defaults.yaml" "$crt" \
+    && grep -qF "$(cd "$GX/sdp" && pwd -P)/gates.yaml" "$crt" \
+    && [ -s "$PJC/.private/sdp-config-provenance.json" ]; } \
+  && ok "Claude plugin anchor uses global config + plugin-local discovery module" \
+  || bad "Claude plugin anchor/global config path"
 # precedence: a project .sdp/ ALWAYS beats the global config.
-PJ2="$(mktemp -d -t sdp_proj2.XXXXXX)"; mkdir -p "$PJ2/.sdp"; cp "$SDP_ROOT/.sdp/defaults.yaml" "$PJ2/.sdp/"
+PJ2="$(mktemp -d -t sdp_proj2.XXXXXX)"; mkdir -p "$PJ2/.sdp"; cp "$SDP_ROOT/.sdp/defaults.yaml" "$PJ2/.sdp/"; cp "$SDP_ROOT/.sdp/gates.yaml" "$PJ2/.sdp/"
 prt="$(CLAUDE_PROJECT_DIR="$PJ2" XDG_CONFIG_HOME="$GX" bash "$SDP_ROOT/scripts/sdp-anchor.sh" 2>/dev/null)"
-{ [ -f "$prt" ] && grep -qF "$PJ2/.sdp/defaults.yaml" "$prt"; } \
-  && ok "project .sdp/ beats global config (precedence)" || bad "project precedence"
-rm -rf "$GX" "$PJ" "$PJ2"
+{ [ -f "$prt" ] && grep -qF "$(cd "$PJ2/.sdp" && pwd -P)/defaults.yaml" "$prt" \
+    && grep -qF "$(cd "$PJ2/.sdp" && pwd -P)/gates.yaml" "$prt"; } \
+  && ok "project .sdp/ beats global defaults/gates" || bad "project precedence"
+
+# Unsafe higher-priority presence must stop anchor rather than fall through.
+PJ3="$(mktemp -d -t sdp_proj3.XXXXXX)"; TARGET="$(mktemp -d -t sdp_target.XXXXXX)"
+cp "$SDP_ROOT/.sdp/defaults.yaml" "$TARGET/defaults.yaml"; ln -s "$TARGET" "$PJ3/.sdp"
+CLAUDE_PROJECT_DIR="$PJ3" XDG_CONFIG_HOME="$GX" bash "$SDP_ROOT/scripts/sdp-anchor.sh" >/dev/null 2>&1 \
+  && bad "unsafe project .sdp symlink fell through" || ok "unsafe project config ancestor fails closed"
+rm -rf "$GX" "$PJ" "$PJC" "$PJ2" "$PJ3" "$TARGET"
 
 # doctor reports TWO axes and exits non-zero if either is unhealthy: `toolchain`
 # (is a primary reviewer trustably resolvable) and `gate-state` (is any artifact

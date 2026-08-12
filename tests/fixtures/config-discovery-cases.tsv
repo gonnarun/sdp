@@ -1,0 +1,8 @@
+# case	project_rel	xdg_rel	home_rel	expected_source
+project_dot	.sdp/defaults.yaml	-	-	project_dot
+project_scripts	scripts/sdp/defaults.yaml	-	-	project_scripts
+project_beats_xdg	.sdp/defaults.yaml	sdp/defaults.yaml	-	project_dot
+xdg	-	sdp/defaults.yaml	-	xdg
+home_config	-	-	.config/sdp/defaults.yaml	home_config
+home_dot	-	-	.sdp/defaults.yaml	home_dot
+none	-	-	-	none

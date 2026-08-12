@@ -261,7 +261,7 @@ The gate keeps **per-artifact, on-disk state** (a date-free log keyed by the art
 - Cumulative BLOCK count is tracked per artifact in the gate log; a malformed log line counts **toward** the halt, never away, and an unreadable log is INFRA_ERROR (never `count=0`).
 - Cumulative BLOCK ≥ `${halt.max_block}` (13) → a sticky `.halt` + BLOCK.
 - `.halt` present → no retry until it is cleared (by the override, or by a human removing the gitignored file).
-- `RESET` / `OVERRIDE` / `PIVOT_RESET` log entries reset the counter to 0, and the gate records team markers themselves as counter-neutral log entries (parity per `${cadence.review_on}`). The escalation cadence — `TEAM_REVIEW` on even rounds / `TEAM_CARRY` on odd from `${cadence.escalate_from}` — is enforced by the gate: `_validate_marker` checks the marker kind against the cadence and requires a roster of >=2 distinct members, and refuses the review when either fails. It does **not** verify who those members are, or that a review occurred.
+- `RESET` / `OVERRIDE` / `PIVOT_RESET` log entries reset the counter to 0 **and retire any live marker**, and the gate records team markers themselves as counter-neutral log entries (parity per `${cadence.review_on}`). The escalation cadence is enforced by the gate from `${cadence.escalate_from}` onward. One accepted marker discharges `${cadence.marker_span}` consecutive rounds (default 1 = a marker per round); the rounds it covers form a **window**, and the window's **anchor** round — not the live round — decides the required kind, `TEAM_REVIEW` on even / `TEAM_CARRY` on odd. Expiry is derived from the log (BLOCK attempts recorded after the marker), never from a field the marker carries. `_validate_marker` checks the kind against the cadence, requires a roster of >=2 distinct members, and for `TEAM_REVIEW` requires cited outputs newer than the BLOCK that opened the window (`since=`). It does **not** verify who those members are, or that a review occurred.
 
 ### INFRA flag (REQ-M11)
 On INFRA_ERROR the gate writes a per-artifact `.infra_flag`. Stage 8 MERGE/PUSH stays refused while an infra flag exists (or while `doctor` exits non-zero); a clean `ALLOW:` clears it.
@@ -366,7 +366,7 @@ Record a work-log entry per completed unit: build/test issues, troubleshooting, 
 
 **Scope — runtime deliverables only.** Applies to the documents stages produce: `normalize_{feature}.md` (S2), `survey_{feature}.md` (S3), `plan_{feature}.md` / `design_{feature}.md` / `fix_plan_{feature}_N.md` (S4), `testplan_{feature}.md` (S6), `testresult_{feature}.md` (S7), the Stage 8 verification checklist, worktree handovers, and gate human-readable lines. **Plugin-facing assets** (this core, `commands/`, `README`) are **always English — never localized.** Source **code, identifiers, and commit messages** are not localized either.
 
-**Modes** — read the `output_locale` key from `.sdp/defaults.yaml` for the *mode*; use `OUTPUT_LOCALE` in `.sdp_runtime.env` for the *target language*:
+**Modes** — read `OUTPUT_LOCALE_MODE` and `OUTPUT_LOCALE` from the anchor-written `.sdp_runtime.env` as metadata (never source it as shell code):
 - **`auto`** (default): author the **English canonical original**, and when the environment locale ≠ `en`, **also produce a synchronized copy in that locale** for user verification, kept in sync with the English canonical. When the env locale = `en`, English only.
 - **`en`**: English only.
 - **`<locale>`** (e.g. `ko`, `ja`): a single deliverable in that language.
@@ -375,13 +375,13 @@ Record a work-log entry per completed unit: build/test issues, troubleshooting, 
 
 **Machine-parsed tokens stay ASCII/English in every mode**: `ALLOW:` / `BLOCK:`, team markers (`TEAM_REVIEW` / `TEAM_CARRY` — the only two the gate parses), REQ-IDs (`REQ-###`), and config keys. Never translate these — the gate and log parsers match them literally (NFR-08).
 
-> ⚠ **Resolution caveat**: `sdp-anchor.sh` collapses `auto` into the resolved env locale, so `OUTPUT_LOCALE` alone cannot distinguish `auto` (dual English + locale copy) from a fixed `<locale>` (single). Decide the mode from the `output_locale` key in `.sdp/defaults.yaml`; use `OUTPUT_LOCALE` only for the target language.
+> `OUTPUT_LOCALE_MODE` distinguishes `auto` (dual English + locale copy) from a fixed locale; `OUTPUT_LOCALE` carries the resolved target language. `DEFAULTS` records the selected local/global source for provenance only.
 
 ---
 
 ## Project-specific rules
 
-Stack, DB, build, server, and migration conventions are **not** in this core. They live in `.sdp/project-rules.md` (per project) and `.sdp/defaults.yaml` (`build.*`, `test.*`, `migrate.*`). This core references them only as `${...}` / by pointer. To have the gate include `.sdp/project-rules.md` in the review, set `gates.yaml: review_checklist_include: .sdp/project-rules.md` (the file must exist non-empty or the gate fail-closes). `require_checklist: true` **without** an include is itself a BLOCK — it does not auto-include.
+Stack, DB, build, server, and migration conventions are **not** in this core. They live in the anchor-selected `defaults.yaml` (`build.*`, `test.*`, `migrate.*`) and project `.sdp/project-rules.md`. This core references them only as `${...}` / by pointer. To have the gate include `.sdp/project-rules.md` in the review, set `gates.yaml: review_checklist_include: .sdp/project-rules.md` (the file must exist non-empty or the gate fail-closes). `require_checklist: true` **without** an include is itself a BLOCK — it does not auto-include.
 
 ---
 

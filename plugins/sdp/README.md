@@ -73,7 +73,7 @@ Claude Code keeps the agent types and `opus`/`sonnet`/`haiku` model profile in t
 
 Codex controls usable cost axes instead: agent count, fan-out, surface-aware lane collapse, direct tool use, compact evidence, duplicate-work avoidance, and early stop. Instruction-level spawn ceilings are S=0, M=2, L=3, XL=5; explicit team requests, High-impact separation, or gate escalation may exceed them with a recorded reason. These are orchestration rules, not runtime-enforced token or billing guarantees.
 
-`CLAUDE_GATE_MODEL` affects only the isolated Claude reviewer process. It does not select Codex main or subagent models. Adversarial review stops on the first `ALLOW:`, counts only content `BLOCK:` verdicts toward the maximum of 13, excludes `INFRA_ERROR`, records provider/revision/correction evidence, and forbids attempt 14. This preserves team execution, independent cross-validation, and Claude-gate safety without changing Claude Code's native workflow.
+Reviewer model and provider timeouts come only from the selected `gates.yaml`; no environment variable selects them. Adversarial review stops on the first `ALLOW:`, counts only content `BLOCK:` verdicts toward the maximum of 13, excludes `INFRA_ERROR`, records provider/revision/correction evidence, and forbids attempt 14.
 
 ---
 
@@ -85,7 +85,7 @@ Codex controls usable cost axes instead: agent count, fan-out, surface-aware lan
 
 That runs Stages 1–8 in the current session: it interviews you for scope, assigns REQ-IDs, investigates the current code, writes a design + plan, submits the plan to **Gate A**, implements, writes and runs real-backing-service tests, submits results to **Gate B**, and finishes with a verification checklist. Deliverables land under `.private/sdp-artifacts/{date}/{topic}/`.
 
-To adopt it in your own project, drop a thin config in `.sdp/defaults.yaml` (see [Configuration](#configuration)) — the plugin owns everything else.
+User-global config works across repositories with no setup in each repo. Add `.sdp/defaults.yaml` only when that project deliberately overrides the global defaults (see [Configuration](#configuration)).
 
 ---
 
@@ -138,14 +138,18 @@ companion plugin (accelerator, optional)
 - **Read-only**: the reviewer runs `-s read-only` and cannot modify your repo.
 - **Prompt-injection resistant**: artifact content is wrapped as untrusted data, artifact paths are validated inside the workspace, the reviewer runs with an empty tool allowlist and no session persistence, and workspace-local reviewer binaries are rejected.
 
-### Escalation (≥ 6 BLOCKs)
+### Escalation (default configuration)
+
+Rounds and kinds below are the **shipped default** — `escalate_from: 6`, `marker_span: 1`, `review_on: even`, `max_block: 13`. Both cadence keys are configurable; see [Configuration](#configuration).
 
 | Round | Planner-solo | Required |
 |---|---|---|
 | 1–5 | allowed | — |
-| 6, 8, 10, 12 (even) | **blocked** | `TEAM_REVIEW` (roster ≥ 2, root-cause table, decision) |
-| 7, 9, 11 (odd) | **blocked** | `TEAM_CARRY` (retain the team) |
-| 12 | — | `.halt` + report to user |
+| 6, 8, 10, 12 (even anchor) | **blocked** | `TEAM_REVIEW` (roster ≥ 2, root-cause table, decision, fresh `outputs=`) |
+| 7, 9, 11 (odd anchor) | **blocked** | `TEAM_CARRY` (retain the team) |
+| 13 | — | `.halt` + report to user |
+
+At `marker_span: 1` every round is its own window, so the anchor is the live round and the table reads directly. At a wider span one marker covers the whole window and the **anchor** — the round that opened it — fixes the required kind for every round inside.
 
 Planner-solo is a hard block across the entire 6+ range — the gate refuses to re-run the reviewer until a valid team roster is recorded in the gate log — a fail-closed check on log content, not a barrier against a same-uid writer who can append to that log.
 
@@ -166,14 +170,16 @@ Gate state operations are an operator procedure — see [`docs/GATE_OPERATIONS.m
 
 ## Configuration
 
-Projects own a thin config; the plugin owns everything else. Discovery order:
+SDP is a user-global harness. User-global config supplies cross-repository defaults; projects may own a thin, explicit override. Discovery order:
 
 ```
 $PROJECT_DIR/.sdp/         →  $PROJECT_DIR/scripts/sdp/
   →  $XDG_CONFIG_HOME/sdp/  →  ~/.sdp/
 ```
 
-Project-local paths always win. Whichever file is selected is still subject to the **no-weakening** check: a user-global config can strengthen the base safety keys but never relax them.
+Project-local paths always win. A selected `defaults.yaml` is still subject to the **no-weakening** check: a user-global config can strengthen the base safety keys but never relax them. Missing files use safe built-in defaults. A present symlink, non-regular file, unreadable file, or relative `XDG_CONFIG_HOME` fails closed instead of falling through.
+
+`XDG_CONFIG_HOME` is a trusted operator locator and must be absolute. Ambient `HOME` does not redirect fallback: SDP resolves `~/.config/sdp/` and `~/.sdp/` from the password database. Config contents are never sourced as shell code; `.sdp_runtime.env` is metadata for the active command only.
 
 ```yaml
 base_dir: .private/sdp-artifacts        # deliverable root (default)
@@ -193,7 +199,11 @@ gate:
 forced_ext: { ... }                     # project security rules (extend, never weaken the base)
 ```
 
-Gate cadence, timeouts and halt limits live alongside it in `.sdp/gates.yaml`.
+Gate cadence, timeouts and halt limits use the same discovery order in `gates.yaml`. Put shared values in the user-global location; use project `.sdp/gates.yaml` only for a deliberate override.
+
+Escalation cadence has two knobs. `cadence.escalate_from` is the cumulative BLOCK count at which planner-solo is refused and a team marker becomes mandatory. `cadence.marker_span` is how many consecutive rounds one accepted marker discharges — default `1` (a marker every round); at `4` with `escalate_from: 8` and `max_block: 13` the windows are 8-11 and 12-13, so two markers cover the whole escalation range. Both raise the cost of getting stuck, so `sdp-regression.sh` bounds them: `escalate_from <= 8`, `marker_span <= 4`, `max_block <= 13`. A wider span also fixes the required marker **kind** to the window anchor's parity, so `review_on: even` with `span: 4` yields `TEAM_REVIEW` every time and `TEAM_CARRY` never falls due.
+
+User-global `gates.yaml` affects both Codex- and Claude Code-hosted workflows. Promote only truly shared values: `mode` and `require_primary_verdict` change interactive/unattended policy everywhere, while legacy `model` is passed to Claude, Codex, and agy and should stay empty unless one identifier is valid for all three. Provider timeouts (`claude_timeout`, `codex_timeout`, `agy_timeout`) remain separate.
 
 ---
 
@@ -252,7 +262,7 @@ python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$PWD" --reviewer claude "<revi
 See [`KNOWN_GAPS.md`](https://github.com/gonnarun/sdp/blob/master/docs/KNOWN_GAPS.md) for details and code locations.
 
 - **`batch-sdp` `tmux_long_lived` engine** and **`worktree-dispatch` `auto` mode** launch **Codex implementation workers** through `scripts/run_segment_tmux.sh`; Claude Code is used only by review gates. They require `tmux`, `codex`, `git`, and a git-backed cwd; unavailable environments fall back to `agent_tool` / `manual`. Residual gaps: no live headless Codex test in CI, no live Orca/Codex re-measurement, and no per-worktree gate-audit aggregation.
-- **`output_locale: auto` dual-copy** is an *authoring-time* instruction, not a runtime feature: `sdp-anchor.sh` resolves `auto` to a single environment locale, so nothing at runtime distinguishes `auto` (English canonical + synced copy) from a fixed `<locale>`. The Stage templates carry the authoring rule (REQ-U-08) that reads the mode from `.sdp/defaults.yaml`.
+- **`output_locale: auto` dual-copy** remains an authoring-time instruction. The anchor records both `OUTPUT_LOCALE` and `OUTPUT_LOCALE_MODE` in runtime metadata, so stages can distinguish automatic dual output from a fixed locale without re-reading a local config file.
 - **Gate-log integrity is honor-plus-evidence, not cryptographic.** The log is same-uid agent-writable; the gate validates structure and freshness, not authorship.
 - **Token budget accounting is not live.** `dispatch.token_budget` enforces only when an external hook supplies `SDP_TOKENS_USED`; no such writer ships.
 

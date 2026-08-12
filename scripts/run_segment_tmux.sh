@@ -52,10 +52,7 @@ SDP_ROOT="$(cd "$SDP_SCRIPTS/.." && pwd)"
 # shellcheck source=/dev/null
 [ -f "$SDP_SCRIPTS/lib/sdp-config.sh" ] && . "$SDP_SCRIPTS/lib/sdp-config.sh"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
-DEFAULTS=""
-for _c in "$PROJECT_DIR/.sdp/defaults.yaml" "$PROJECT_DIR/scripts/sdp/defaults.yaml"; do
-  [ -f "$_c" ] && { DEFAULTS="$_c"; break; }
-done
+DEFAULTS="$(sdp_cfg_discover "$PROJECT_DIR" defaults.yaml)"
 cfg() { { [ -n "$DEFAULTS" ] && command -v sdp_cfg_get >/dev/null 2>&1 && sdp_cfg_get "$DEFAULTS" "$1"; } || printf ''; }
 
 SESSION_PREFIX="${SDP_SESSION_PREFIX:-$(cfg dispatch.session_prefix)}"; : "${SESSION_PREFIX:=sdp-seg}"
