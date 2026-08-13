@@ -46,7 +46,7 @@ Engine is selected by `dispatch.batch_engine` in `.sdp/defaults.yaml`:
 | Value | Behavior |
 |---|---|
 | `agent_tool` (default) | Each segment runs as a subagent in this session. No extra tooling. |
-| `tmux_long_lived` | One long-lived `claude` session per batch inside `tmux`; segments are pushed in as prompts. Requires `tmux` and `claude` on `PATH`, otherwise falls back to `agent_tool`. |
+| `tmux_long_lived` | One long-lived **Codex** worker session per batch inside `tmux`; segments are pushed in as prompts. Requires `tmux`, `codex` and `git` on `PATH` and a git-backed cwd, otherwise falls back to `agent_tool`. Claude Code is used only by the review gates. |
 
 Segment completion is signalled by a `STATUS.md` file, never by scraping the terminal.
 
@@ -81,7 +81,7 @@ Mode is selected by `dispatch.worktree_mode`:
 | Value | Behavior |
 |---|---|
 | `manual` (default) | Each task produces a handover document you launch yourself. |
-| `auto` | Each worktree gets a headless session spawned for it. Requires `tmux` and `claude`, otherwise falls back to `manual`. |
+| `auto` | Each worktree gets a headless **Codex** session spawned for it. Requires `tmux`, `codex` and `git`, otherwise falls back to `manual`. |
 
 Worktree sessions produce verification checklists only. Runtime/screen tests run serially on main after merge (`worktree.runtime_isolation: serial_main`), unless the project opts into per-worktree ephemeral runtimes.
 

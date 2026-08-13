@@ -12,7 +12,7 @@ cd sdp
 git config core.hooksPath .githooks   # required — see "Pre-commit hook" below
 ```
 
-No dependency install step exists. Everything is bash + Python 3.9+ standard library. Optional: `shellcheck` for the lint step, `tmux` for the long-lived batch engine, and a `codex` and/or `claude` CLI if you want to exercise the gate against a live reviewer.
+No dependency install step exists. Everything is bash + Python 3.9+ standard library. `shellcheck` is **required** to run the suite — `tests/run.sh` runs the lint step on both the `--fast` and full paths and does not skip it when the binary is missing. Optional: `tmux` for the long-lived batch engine, and a `codex` and/or `claude` CLI if you want to exercise the gate against a live reviewer.
 
 ---
 

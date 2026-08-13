@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SDP Segment Runner (tmux long-lived Codex) — vendored, de-domained.
-# Ported from the Project-A reference (scripts/meta_wf/run_segment_tmux.sh);
-# all project-specific literals externalized to config. Backs batch-sdp's
+# SDP Segment Runner (tmux long-lived Codex).
+# Written by this project's maintainer, carried over from an earlier private
+# implementation of the same idea and de-domained for release: all
+# project-specific literals are externalized to config. No third-party code. Backs batch-sdp's
 # `tmux_long_lived` engine and worktree-dispatch's `auto` mode (REQ-C-03/07).
 #
 # Purpose: run one long-lived interactive Codex worker per batch inside tmux;

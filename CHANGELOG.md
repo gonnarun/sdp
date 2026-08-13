@@ -2,6 +2,8 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is the plugin manifest version in `plugins/sdp/.claude-plugin/plugin.json`.
 
+**A manifest version is not by itself a release.** The pre-commit hook bumps both plugin manifests on every commit, as an install-cache cachebuster — `plugins/sdp/.codex-plugin/plugin.json` additionally carries a `+codex.<timestamp>` build tag for the same reason. The sections below are the releases.
+
 SDP is pre-1.0: config keys, marker grammar and the gate CLI may change between minor versions. Pin `sdp_version` in `.sdp/defaults.yaml` if you depend on them.
 
 ## [Unreleased]
@@ -43,7 +45,7 @@ Condensed; see `git log` for the full record.
 - **Durable escalation stall signal**, with `halt.max_stall` bounding consecutive stalls before `.halt`.
 - **Complete D-07 gate state machine** — stuck detection, escalation cadence, team markers, pivot.
 - **MCP server** (`scripts/sdp_mcp_server.py`) exposing the gate to Codex as `claude_review_gate`, resolved via `CLAUDE_PLUGIN_ROOT`.
-- **Vendored, de-domained `run_segment_tmux.sh`** backing `batch-sdp`'s `tmux_long_lived` engine and `worktree-dispatch`'s `auto` mode, with graceful fallback when `tmux`/`claude` are absent.
+- **De-domained `run_segment_tmux.sh`** (maintainer-authored; no third-party code) backing `batch-sdp`'s `tmux_long_lived` engine and `worktree-dispatch`'s `auto` mode, with graceful fallback when `tmux`/`codex`/`git` are absent.
 - **Single-source plugin tree generator** (`scripts/build_plugin_tree.py`) with a `--check` mode wired into the fast test suite, so a hand-edited root mirror cannot be committed.
 - **i18n authoring rule (REQ-U-08)** in the core and per-Stage anchors; `OUTPUT_LOCALE_MODE` emitted alongside `OUTPUT_LOCALE`.
 - Test suites for concurrency, MCP protocol, gate markers, config safety, docs consistency, i18n, packaging, adapters, the segment runner, and a multi-project regression harness.
@@ -64,6 +66,3 @@ Condensed; see `git log` for the full record.
 
 ### Removed
 - `codex-gate.sh` and `agy-gate-fallback.sh`, superseded by `review_gate.py`.
-
-[Unreleased]: https://github.com/gonnarun/sdp/compare/v0.1.37...HEAD
-[0.1.37]: https://github.com/gonnarun/sdp/releases/tag/v0.1.37

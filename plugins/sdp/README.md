@@ -14,7 +14,7 @@ SDP gives an agent session a fixed spine — eight numbered stages, two mandator
 - **A gate that survives plugin loss** — the review gate runs off the raw `codex` / `claude` CLIs. No companion plugin, no marketplace, no version-scan — just the binary on your `PATH`, then Fail-Close.
 - **Cross-model review** — Claude-authored artifacts are reviewed by codex; codex-authored artifacts are reviewed by Claude. Self-review is structurally prevented, and the test suite asserts it.
 - **Real-world tests, not just units** — the test stage mandates a floor of *smoke + integration against a real backing service* (local DB / local server, or a designated test DB/server), not mocks.
-- **Resource-aware escalation** — after 6 consecutive gate BLOCKs, planner-solo execution is hard-blocked and a team re-review is forced on every even round.
+- **Resource-aware escalation** — once an artifact's *cumulative* gate BLOCK count reaches `cadence.escalate_from` (default 6), planner-solo execution is hard-blocked and a recorded team marker is required to proceed. `cadence.marker_span` (default 1) sets how many rounds one marker covers.
 - **Clean stage numbering** — stages are plain integers **1…8**, never `0 / 0.5 / 2.5`.
 
 ---
@@ -25,9 +25,10 @@ SDP gives an agent session a fixed spine — eight numbered stages, two mandator
 |---|---|
 | **Host** | Claude Code with plugin support, and/or the `codex` CLI with plugin support |
 | **Python** | 3.9+ (standard library only — no pip installs) |
-| **Reviewer CLIs** | `codex` (≥ 0.141.0) and/or `claude` on `PATH`. At least one is required; the gate reviews with the *opposite* one from the author. |
+| **Reviewer CLI** | The gate reviews with the model **opposite** the author, so the one you need is the one your host is *not*: on **Claude Code** you need `codex` (≥ 0.141.0) on `PATH`; on **Codex** you need `claude`. Using both hosts means installing both. Having only your own host's CLI leaves the gate with no reviewer and it fails closed to `INFRA_ERROR`. |
 | **git** | Required — `worktree-dispatch` creates worktrees |
-| **Optional** | `tmux` (long-lived batch engine), `shellcheck` (lint), `agy` (fallback reviewer — see below) |
+| **Optional** | `tmux` (long-lived batch engine), `agy` (fallback reviewer — see below) |
+| **To run the test suite** | `shellcheck` — the lint step is not skippable; see [Test](#test) |
 
 **About `agy`.** `agy` is an optional third-party multi-model reviewer CLI. When the primary reviewer hits an *infrastructure* failure (binary missing, timeout, empty or malformed output), the gate tries `agy` before failing closed. It is **not required**: with no `agy` installed the gate simply Fail-Closes to `BLOCK: INFRA_ERROR` instead, which is the safe outcome. A content `BLOCK:` from the primary reviewer is terminal and is *never* sent to `agy` for override.
 
@@ -35,27 +36,58 @@ SDP gives an agent session a fixed spine — eight numbered stages, two mandator
 
 ## Install
 
+SDP installs as a plugin on either host. The two hosts keep **separate** plugin caches, so installing on one does not install on the other — run the block for each host you use.
+
 ### Claude Code
+
+From inside a Claude Code session:
 
 ```
 /plugin marketplace add gonnarun/sdp
-/plugin install sdp
+/plugin install sdp@sdp-marketplace
+```
+
+Or from a shell:
+
+```bash
+claude plugin marketplace add gonnarun/sdp
+claude plugin install sdp@sdp-marketplace
 ```
 
 ### Codex
 
-```
-codex plugin marketplace add /path/to/sdp
-codex plugin add sdp@sdp-local
+```bash
+codex plugin marketplace add gonnarun/sdp
+codex plugin add sdp@sdp-marketplace
 ```
 
-Codex packaging lives in `.codex-plugin/plugin.json`, with a bundled MCP server in `.mcp.codex.json`. The Codex-side review gate is exposed as MCP tool `claude_review_gate`.
+`codex plugin marketplace add` also accepts a local path or an HTTPS/SSH Git URL, so `codex plugin marketplace add https://github.com/gonnarun/sdp.git` and `codex plugin marketplace add /path/to/a/clone` work too.
+
+Codex packaging lives in `plugins/sdp/.codex-plugin/plugin.json`, with a bundled MCP server in `plugins/sdp/.mcp.codex.json`. The Codex-side review gate is exposed as MCP tool `claude_review_gate`.
+
+### Restart the session
+
+**Required, on both hosts.** The gate engine is a running process; installing or updating the plugin does not swap it. `/reload-plugins` refreshes skills, commands and hooks but leaves the engine on the old version — see `NC-19` in the known-gaps register. Start a new session before using the gate.
 
 ### Verify the toolchain
 
+From a checkout:
+
+```bash
+python3 scripts/review_gate.py doctor
 ```
-python3 scripts/review_gate.py doctor    # reports claude / codex / agy presence + versions
+
+From an installed plugin — the two hosts keep separate caches, and several versions coexist in each by design, so pick the newest:
+
+```bash
+# Claude Code
+python3 "$(ls -d ~/.claude/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)scripts/review_gate.py" doctor
+
+# Codex
+python3 "$(ls -d ~/.codex/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)scripts/review_gate.py" doctor
 ```
+
+`doctor` reports two axes — `toolchain` (claude / codex / agy presence and versions) and `gate-state` — and exits non-zero if either is unhealthy.
 
 Codex-side gate order:
 
@@ -77,11 +109,80 @@ Reviewer model and provider timeouts come only from the selected `gates.yaml`; n
 
 ---
 
+## Update
+
+Updating is two steps per host — refresh the marketplace snapshot, then upgrade the installed plugin — followed by a session restart.
+
+### Claude Code
+
+```bash
+claude plugin marketplace update sdp-marketplace
+claude plugin update sdp@sdp-marketplace
+```
+
+### Codex
+
+```bash
+codex plugin marketplace upgrade sdp-marketplace
+codex plugin add sdp@sdp-marketplace
+```
+
+Then **restart the session** on that host. `claude plugin update` says so itself; the reason is the same running-engine problem described above.
+
+Confirm the update took, by running the **installed** engine — not a checkout copy, which would report on itself — against the project you care about:
+
+```bash
+cd /path/to/your/project
+
+# Claude Code
+python3 "$(ls -d ~/.claude/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)scripts/review_gate.py" --cwd . doctor | grep anchor:
+
+# Codex
+python3 "$(ls -d ~/.codex/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)scripts/review_gate.py" --cwd . doctor | grep anchor:
+```
+
+`doctor` reports `anchor: current` when the project's recorded runtime matches the installed plugin, and `anchor: STALE` when it still names an older one. A stale anchor is a report, not a failure — re-run the anchor in that project to clear it:
+
+```bash
+CLAUDE_PROJECT_DIR="$PWD" bash "<plugin>/scripts/sdp-anchor.sh"
+```
+
+The `/sdp` command runs the anchor itself on entry, so a project you are about to use SDP in needs no manual step.
+
+Older plugin versions stay on disk after an update because live sessions still hold them. That is expected; deleting them breaks running sessions.
+
+## Test
+
+No installation is needed to run the suite — clone the repository and run:
+
+```bash
+git clone https://github.com/gonnarun/sdp.git
+cd sdp
+bash tests/run.sh
+```
+
+`tests/run.sh` is the only entry point. `--fast` runs the subset the pre-commit hook uses:
+
+```bash
+bash tests/run.sh --fast      # regen-check + orphan-detector + packaging + smoke + lint
+```
+
+| To run the suite | |
+|---|---|
+| `bash`, `git`, `python3` 3.9+ | required |
+| `shellcheck` | **required** — `tests/run.sh` runs the lint step on both the `--fast` and full paths and fails if it is absent |
+| `tmux`, `codex` | optional — the dispatch suites print `SKIP` and pass without them |
+| `claude` / `codex` / `agy` | **not required** — the gate suites drive the engine through a stub binary resolver, and `tests/smoke.sh` self-skips `doctor`'s toolchain axis when no reviewer CLI resolves |
+
+The suite is fully offline: no network, no model calls, no reviewer account. It must be green from any working directory.
+
 ## Quick start
 
 ```
-/sdp add a per-user login attempt limit
+$sdp:sdp add a per-user login attempt limit
 ```
+
+This is the **Codex** form. In Claude Code the same command is `/sdp …` — see the note in [`COMMAND_MANUAL.md`](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.md).
 
 That runs Stages 1–8 in the current session: it interviews you for scope, assigns REQ-IDs, investigates the current code, writes a design + plan, submits the plan to **Gate A**, implements, writes and runs real-backing-service tests, submits results to **Gate B**, and finishes with a verification checklist. Deliverables land under `.private/sdp-artifacts/{date}/{topic}/`.
 
@@ -100,7 +201,9 @@ User-global config works across repositories with no setup in each repo. Add `.s
 
 The first three share **one SDP core** — identical Stage 1–8, identical two gates, identical evaluator PASS. Parallelism never weakens the gate. `/precompact` is a utility command and does not run the SDP core.
 
-A per-command reference with examples is in [`COMMAND_MANUAL.md`](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.md).
+Command names are written in the Claude Code slash form above. On Codex the same commands are `$sdp:sdp`, `$sdp:batch-sdp`, `$sdp:worktree-dispatch` and `$sdp:precompact`.
+
+A per-command reference with examples is in [`COMMAND_MANUAL.md`](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.md) ([한국어](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.ko.md)).
 
 ---
 
@@ -149,7 +252,8 @@ Rounds and kinds below are the **shipped default** — `escalate_from: 6`, `mark
 | 7, 9, 11 (odd anchor) | **blocked** | `TEAM_CARRY` (retain the team) |
 | 13 | — | `.halt` + report to user |
 
-At `marker_span: 1` every round is its own window, so the anchor is the live round and the table reads directly. At a wider span one marker covers the whole window and the **anchor** — the round that opened it — fixes the required kind for every round inside.
+At `marker_span: 1` every round is its own window, so the anchor is the live round and the table reads directly.
+This repository's own `.sdp/gates.yaml` deliberately runs `escalate_from: 8` / `marker_span: 4`, with the `cadence.relaxation_ack` that `sdp-regression.sh` requires for any value past the baseline. It is an example of the override, not the default. At a wider span one marker covers the whole window and the **anchor** — the round that opened it — fixes the required kind for every round inside.
 
 Planner-solo is a hard block across the entire 6+ range — the gate refuses to re-run the reviewer until a valid team roster is recorded in the gate log — a fail-closed check on log content, not a barrier against a same-uid writer who can append to that log.
 
@@ -270,7 +374,7 @@ See [`KNOWN_GAPS.md`](https://github.com/gonnarun/sdp/blob/master/docs/KNOWN_GAP
 
 ## Status
 
-**Working, pre-1.0.** The plugin installs and runs on both hosts, the gate is exercised by ~350 assertions across 14 suites, and the source repo dogfoods SDP on itself. Interfaces (config keys, marker grammar, gate CLI) may still change before 1.0 — pin `sdp_version` if you depend on them.
+**Working, pre-1.0.** The plugin installs and runs on both hosts, the gate is exercised by 626 assertions across 15 suites, and the source repo dogfoods SDP on itself. Interfaces (config keys, marker grammar, gate CLI) may still change before 1.0 — pin `sdp_version` if you depend on them.
 
 ---
 

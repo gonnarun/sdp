@@ -17,7 +17,7 @@ Applies to all project spaces — issues, pull requests, discussions, commit mes
 
 ## Enforcement
 
-Report unacceptable behavior to the maintainer at <gonnarun@users.noreply.github.com>. Reports are handled privately.
+Report unacceptable behavior privately to the maintainer through GitHub — open a [private security advisory](https://github.com/gonnarun/sdp/security/advisories/new) on this repository, which is a private channel visible only to the maintainer, or contact the repository owner through their GitHub profile. Reports are handled privately.
 
 The maintainer may edit or remove contributions that violate this document, and may block a contributor from the repository. For a first, minor incident the usual response is a private note asking for a correction; repeated or severe behavior results in a block without further warning.
 
