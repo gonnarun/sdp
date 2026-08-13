@@ -124,6 +124,111 @@ bash "$REG" "$NOESC" >"$TMP/noesc.out" 2>&1 && ok "harness ACCEPTS ef>=max_block
 grep -q 'no permissive escalation window' "$TMP/noesc.out" \
   && ok "empty range: reported as halt-first, not as a cadence weakening" || bad "empty-range reason missing"
 
+# --- 3g: non-positive config values must resolve exactly as review_gate.py's
+#         _positive_int does (empty / non-numeric / <= 0 -> the default). The old
+#         `case ''|*[!0-9]*` accepted a literal "0" and diverged on that one value.
+#         Asserting "exit 0" alone is NOT enough here: the marker_span=0 defect
+#         aborted check_project mid-way, so the cadence AND checklist verdicts
+#         vanished from the report while the summary still said 0 failed. Each
+#         fixture therefore asserts that every semantic verdict is PRESENT.
+assert_complete() {   # $1=label $2=harness output file
+  local l="$1" f="$2" miss=""
+  grep -q 'cadence config effective values' "$f" || miss="$miss effective-values"
+  grep -qE 'cadence demands fresh TEAM_REVIEW|never demands a TEAM_REVIEW|no permissive escalation window' "$f" \
+    || miss="$miss cadence-verdict"
+  grep -qE 'checklist not required|fail-closed checklist satisfied|review_checklist_include' "$f" \
+    || miss="$miss checklist-verdict"
+  [ -z "$miss" ] && ok "$l: every semantic verdict reported (no silent disappearance)" \
+    || bad "$l: verdicts silently missing:$miss"
+}
+Z1="$TMP/zero-span"; mkfixture "$Z1" 6 13 false
+cad "$Z1" "review_on: even" "marker_span: 0"
+bash "$REG" "$Z1" >"$TMP/z1.out" 2>&1 && ok "marker_span=0 does not break the harness" \
+  || bad "marker_span=0 should resolve to 1, not fail"
+grep -q 'division by 0' "$TMP/z1.out" && bad "marker_span=0 still reaches a modulo by zero" \
+  || ok "marker_span=0 never reaches a modulo by zero"
+grep -q 'marker_span=1 ' "$TMP/z1.out" && ok "marker_span=0 resolves to the runtime effective value 1" \
+  || bad "marker_span=0 effective value not reported as 1"
+grep -q 'NORMALIZED' "$TMP/z1.out" && ok "marker_span=0 normalization is reported, not silent" \
+  || bad "marker_span=0 normalized silently"
+assert_complete "marker_span=0" "$TMP/z1.out"
+
+Z2="$TMP/zero-ef"; mkfixture "$Z2" 0 13 false
+cad "$Z2" "review_on: even"
+bash "$REG" "$Z2" >"$TMP/z2.out" 2>&1 && ok "escalate_from=0 does not break the harness" \
+  || bad "escalate_from=0 should resolve to 6"
+grep -q 'escalate_from=6 ' "$TMP/z2.out" && ok "escalate_from=0 resolves to the runtime effective value 6" \
+  || bad "escalate_from=0 effective value not reported as 6"
+grep -q 'rounds 6-12' "$TMP/z2.out" \
+  && ok "escalate_from=0 simulates the range the runtime actually uses (6-12, not 0-12)" \
+  || bad "escalate_from=0 simulated a range the runtime never runs"
+assert_complete "escalate_from=0" "$TMP/z2.out"
+
+# max_block=0 is the dangerous one: before the fix the harness reported
+# "no permissive escalation window ... halt precedes escalation (stricter)" for a
+# config the runtime runs with max_block 13 and a fully live cadence.
+Z3="$TMP/zero-mb"; mkfixture "$Z3" 6 0 false
+cad "$Z3" "review_on: even"
+bash "$REG" "$Z3" >"$TMP/z3.out" 2>&1 && ok "max_block=0 does not break the harness" \
+  || bad "max_block=0 should resolve to 13"
+grep -q 'max_block=13 ' "$TMP/z3.out" && ok "max_block=0 resolves to the runtime effective value 13" \
+  || bad "max_block=0 effective value not reported as 13"
+grep -q 'no permissive escalation window' "$TMP/z3.out" \
+  && bad "max_block=0 still falsely certified as halt-first/stricter" \
+  || ok "max_block=0 no longer falsely certified as halt-first (the runtime has a live cadence)"
+assert_complete "max_block=0" "$TMP/z3.out"
+
+# --- 3h: POSITIVE spellings must canonicalize base-10 and clamp exactly as
+#         _positive_int does. Shell cannot: `[ 0013 -lt 20 ]` reads decimal 13
+#         while `$(( 0013 - 1 ))` reads OCTAL 11, and `$(( 008 ))` is a hard
+#         error -- so a leading-zero spelling silently simulated the WRONG round
+#         range and an invalid-octal one re-entered the abort/vanish class.
+Z4="$TMP/lead-zero"; mkfixture "$Z4" 0006 0013 false
+cad "$Z4" "review_on: even" "marker_span: 0001"
+bash "$REG" "$Z4" >"$TMP/z4.out" 2>&1 && ok "leading-zero spellings do not break the harness" \
+  || bad "leading zeros should canonicalize to 6/13/1"
+grep -qE 'value too great for base|division by 0|integer expression' "$TMP/z4.out" \
+  && bad "leading zeros still reach a shell arithmetic error" \
+  || ok "leading zeros never reach a shell arithmetic error"
+grep -q 'escalate_from=6 marker_span=1 max_block=13' "$TMP/z4.out" \
+  && ok "0006/0013/0001 canonicalize base-10 to the runtime effective 6/13/1" \
+  || bad "leading-zero canonicalization wrong"
+grep -q 'rounds 6-12' "$TMP/z4.out" \
+  && ok "leading zeros simulate rounds 6-12 (octal arithmetic previously said 0006-10)" \
+  || bad "leading zeros simulated the wrong round range"
+grep -q 'NORMALIZED' "$TMP/z4.out" && ok "leading-zero canonicalization is reported" \
+  || bad "leading zeros normalized silently"
+assert_complete "leading zeros" "$TMP/z4.out"
+
+# 008 is not a valid octal literal, so the OLD helper handed bash a hard error.
+Z5="$TMP/bad-octal"; mkfixture "$Z5" 008 0013 false
+cad "$Z5" "review_on: even" "relaxation_ack: declared-for-test"
+bash "$REG" "$Z5" >"$TMP/z5.out" 2>&1
+grep -q 'value too great for base' "$TMP/z5.out" \
+  && bad "008 still hands bash an invalid octal literal" \
+  || ok "008 never reaches bash arithmetic as an octal literal"
+grep -q 'escalate_from=8 ' "$TMP/z5.out" && ok "008 canonicalizes base-10 to 8" \
+  || bad "008 canonicalization wrong"
+assert_complete "invalid octal 008" "$TMP/z5.out"
+
+# Values above _positive_int's max_value clamp to 3600; a digit string past the
+# shell's integer range must not surface as an integer-expression error either.
+Z6="$TMP/over-max"; mkfixture "$Z6" 6 3601 false
+cad "$Z6" "review_on: even" "marker_span: 99999999999999999999" "relaxation_ack: declared-for-test"
+bash "$REG" "$Z6" >"$TMP/z6.out" 2>&1
+grep -qE 'integer expression|number truncated|value too great for base' "$TMP/z6.out" \
+  && bad "an over-range digit string still reaches shell arithmetic" \
+  || ok "an over-range digit string never reaches shell arithmetic"
+grep -q 'marker_span=3600 max_block=3600' "$TMP/z6.out" \
+  && ok "3601 and an over-range digit string both clamp to _positive_int's max_value 3600" \
+  || bad "max_value clamp missing (runtime clamps at 3600)"
+assert_complete "over-max clamp" "$TMP/z6.out"
+
+# A project that writes nothing unusual must NOT carry the NORMALIZED marker --
+# otherwise the signal fires on nearly every project and stops meaning anything.
+grep -q 'NORMALIZED' "$TMP/base2.out" && bad "baseline fixture wrongly reported as normalized" \
+  || ok "an ordinary config carries no NORMALIZED marker (signal stays specific)"
+
 # --- 3f: the harness verdict must not depend on the caller's cwd (codex F1) ----
 CWDI="$TMP/cwdi"; mkfixture "$CWDI" 6 13 true ".sdp/project-rules.md"
 echo "domain rules" > "$CWDI/.sdp/project-rules.md"

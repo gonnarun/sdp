@@ -61,6 +61,34 @@ done
 
 # ---- per-project checks ----
 cfgv() { sdp_cfg_get "$1" "$2" 2>/dev/null; }
+
+# norm_int RAW DEFAULT [MAX] -> the value the RUNTIME will actually use.
+#
+# All four steps of review_gate.py _positive_int, delegated to python3 (already a
+# hard dependency here) because SHELL CANNOT EXPRESS THIS CONTRACT SAFELY: bash
+# reads the same digit string two different ways inside one function --
+#   [ 0013 -lt 20 ]      -> test parses 0013 as decimal 13
+#   $(( 0013 - 1 ))      -> arithmetic parses 0013 as OCTAL 11
+#   $(( 008 % 2 ))       -> hard error, "value too great for base"
+# so a leading-zero spelling silently simulated the wrong round range (measured:
+# ef=0006/mb=0013 reported "rounds 0006-10" instead of 6-12), and an invalid-octal
+# spelling re-entered the abort-mid-check_project / silent-verdict-disappearance
+# class. Canonicalising once, in base 10, keeps every later comparison honest.
+#
+# MAX defaults to _positive_int's own max_value (3600). The three cadence keys all
+# call the runtime without an explicit max_value, so they inherit exactly this.
+norm_int() {
+  python3 - "$1" "$2" "${3:-3600}" <<'PY'
+import sys
+raw, default, max_value = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+if not (raw.isascii() and raw.isdigit()):
+    value = default
+else:
+    parsed = int(raw, 10)
+    value = default if parsed <= 0 else min(parsed, max_value)
+print(value, end="")
+PY
+}
 check_project() {
   local p="$1" defaults="" gates=""
   hdr "project: $p"
@@ -87,14 +115,35 @@ check_project() {
 
   # 4 gate-strength thresholds not weakened (AC-12) — only if the project overrides them
   if [ -n "$gates" ]; then
-    local ef mb ms ro ack
-    ef="$(cfgv "$gates" cadence.escalate_from)"; mb="$(cfgv "$gates" halt.max_block)"
-    ms="$(cfgv "$gates" cadence.marker_span)"; ro="$(cfgv "$gates" cadence.review_on)"
+    local ef mb ms ro ack ef_raw mb_raw ms_raw norm=""
+    ef_raw="$(cfgv "$gates" cadence.escalate_from)"; mb_raw="$(cfgv "$gates" halt.max_block)"
+    ms_raw="$(cfgv "$gates" cadence.marker_span)"; ro="$(cfgv "$gates" cadence.review_on)"
     ack="$(cfgv "$gates" cadence.relaxation_ack)"
-    case "$ef" in ''|*[!0-9]*) ef=6 ;; esac
-    case "$mb" in ''|*[!0-9]*) mb=13 ;; esac
-    case "$ms" in ''|*[!0-9]*) ms=1 ;; esac
+    # The harness must model what the RUNTIME will do, so it resolves these the way
+    # review_gate.py _positive_int does: empty, non-ASCII-digit, or NON-POSITIVE all
+    # fall back to the default. The old `case ''|*[!0-9]*` accepted a literal "0",
+    # which diverged from the runtime on exactly that value -- `marker_span: 0` then
+    # reached a `% 0` and aborted check_project mid-way (taking the cadence AND the
+    # checklist verdicts out of the report while the summary still said 0 failed),
+    # and `max_block: 0` certified "halt precedes escalation" for a config the
+    # runtime runs with max_block 13. Normalizing here is modelling, not policy:
+    # 0 is deliberately NOT turned into a config error the runtime does not have.
+    ef="$(norm_int "$ef_raw" 6)"; mb="$(norm_int "$mb_raw" 13)"; ms="$(norm_int "$ms_raw" 1)"
     [ "$ro" = "odd" ] || ro=even
+    # Only a value the project actually WROTE is worth flagging. An absent key
+    # taking its default is ordinary, and reporting it would put the NORMALIZED
+    # marker on nearly every project (almost none set marker_span), diluting the
+    # exact signal this line exists to carry: "you wrote X, the engine runs Y".
+    [ -n "$ef_raw" ] && [ "$ef_raw" != "$ef" ] && norm="$norm escalate_from=$ef_raw->$ef"
+    [ -n "$mb_raw" ] && [ "$mb_raw" != "$mb" ] && norm="$norm max_block=$mb_raw->$mb"
+    [ -n "$ms_raw" ] && [ "$ms_raw" != "$ms" ] && norm="$norm marker_span=$ms_raw->$ms"
+    # Emitted UNCONDITIONALLY: every later verdict is stated in terms of these, and
+    # a silently-normalized value is exactly what this check exists to surface.
+    if [ -n "$norm" ]; then
+      ok "cadence config effective values: escalate_from=$ef marker_span=$ms max_block=$mb review_on=$ro (NORMALIZED —$norm; runtime resolves empty/non-numeric/non-positive to the default)"
+    else
+      ok "cadence config effective values: escalate_from=$ef marker_span=$ms max_block=$mb review_on=$ro"
+    fi
 
     # 4a BASELINE (the shipped default: escalate_from 6, marker_span 1). A project
     # may always make the gate EARLIER/STRICTER. Going LATER/LOOSER is not silently
