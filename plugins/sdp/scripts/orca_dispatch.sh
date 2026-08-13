@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SDP Orca Dispatch Adapter — vendored, de-domained.
+# SDP Orca Dispatch Adapter. Written by this project's maintainer; no
+# third-party code. De-domained for release.
 # Backs worktree-dispatch's `orca` mode (dispatch.worktree_mode: orca): hands
 # one task to an Orca-supervised worker in an Orca-managed worktree via the
 # `orca` CLI's orchestration RPCs. Sibling of run_segment_tmux.sh (the `auto`

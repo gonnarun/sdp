@@ -673,5 +673,28 @@ ident = all(rg._marker_anchor(p, 6, 1) == p for p in range(6, 14))
 sys.exit(0 if got == want and ident else 1)
 PY
 
+# ---- T43: doctor must see through filesystem aliases (codex review 6, F5) ----
+# macOS firmlinks /tmp and /var onto /private/tmp and /private/var. sdp-anchor.sh
+# records the LOGICAL path (bash `pwd`); the engine derives its own with
+# Path.resolve(), which is PHYSICAL. A plain string compare therefore called a
+# freshly-anchored checkout STALE forever -- cloning to /tmp/sdp, the obvious
+# thing to do, turned the smoke suite red on a correct install.
+python3 - "$SDP_ROOT/scripts" <<'PYALIAS' && ok "T43: _same_dir sees through /tmp and /var firmlinks (no false STALE)" \
+  || bad "T43: aliased paths compare unequal; doctor reports a fresh anchor as STALE"
+import sys, os, tempfile, pathlib
+sys.path.insert(0, sys.argv[1])
+import review_gate as rg
+assert rg._same_dir("/usr", "/usr")
+assert not rg._same_dir("/usr", "/etc")
+assert not rg._same_dir("/nonexistent-sdp-probe-a", "/nonexistent-sdp-probe-b")
+d = tempfile.mkdtemp(dir="/tmp")
+physical = str(pathlib.Path(d).resolve())
+good = True
+if physical != d:
+    good = rg._same_dir(d, physical) and rg._same_dir(physical, d)
+os.rmdir(d)
+sys.exit(0 if good else 1)
+PYALIAS
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

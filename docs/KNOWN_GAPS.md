@@ -8,7 +8,7 @@ _Last reviewed: 2026-08-12._
 
 ## 1. Dispatch backend `run_segment_tmux.sh` — PORTED (with residual test/aggregation gaps)
 
-**Status: ported & vendored; two residual gaps remain (below).**
+**Status: ported; two residual gaps remain (below).**
 
 `scripts/run_segment_tmux.sh` has been **ported and corrected to launch Codex implementation workers**. Claude Code is review-gate only. Config keys `dispatch.batch_engine` / `dispatch.worktree_mode` remain in `.sdp/defaults.yaml`; adapters fall back when `tmux`/`codex`/`git` are absent (exit `5`) or the worker cwd is not a git checkout (exit `3`).
 
@@ -68,10 +68,10 @@ The following **dated design/requirements documents still say "flock"**. They ar
 | Location | Mention | Reconciliation |
 |---|---|---|
 | `docs/…requirements_definition_EN.md` | REQ-G-04, NFR-01, §Concurrency, AC-04 | historical spec — live mechanism is `fcntl.flock` in `review_gate.py` |
-| Korean requirements copy (private, unpublished) | REQ-G-02/04, NFR-01, §동시성, AC-04 | historical spec (KR canonical) — live mechanism is `fcntl.flock` |
+| Historical requirements copy (not published) | REQ-G-02/04, NFR-01, §concurrency, AC-04 | historical spec — live mechanism is `fcntl.flock` |
 | `docs/…stage4_design_EN.md` (and its private Korean copy) | "4-tuple thread stash + `flock` + 24h TTL" | historical design — the thread stash is **retired**; the lock is `fcntl.flock`, no TTL |
 
-Accurate `flock` mentions (left as-is): `scripts/review_gate.py` (`fcntl.flock` in `_state_lock`), `tests/concurrency.sh` (rewritten against the flock critical section), the Stage-5 progress log (private, unpublished).
+Accurate `flock` mentions (left as-is): `scripts/review_gate.py` (`fcntl.flock` in `_state_lock`), `tests/concurrency.sh` (rewritten against the flock critical section), the Stage-5 progress log (not published).
 
 ---
 
@@ -131,7 +131,7 @@ Accurate `flock` mentions (left as-is): `scripts/review_gate.py` (`fcntl.flock` 
 - **flock → mkdir portable lock** (P2) — see item 5.
 - **Dangling `commands` manifest ref** (P3) — `commands/` now exists with three adapters; `plugin.json` re-wired.
 - **REQ-U-08 i18n authoring rule absent from `core/`** (P4) — canonical section in `core/SDP.md` + per-Stage anchors.
-- **`run_segment_tmux.sh` port** (P5) — vendored + de-domained + adapters wired; see item 1 for residual gaps.
+- **`run_segment_tmux.sh` port** (P5) — de-domained + adapters wired; see item 1 for residual gaps.
 - **Token cap + 6-project regression harness** (P6) — enforcement seam + acceptance harness built; see items 3 & 4 for the live-accounting and real-run gaps.
 - **Global config consumer convergence (repository head)** — anchor, gate/MCP, tmux, Orca and regression now share local→XDG→passwd-home discovery; unsafe presence fails closed and audit rows record the actual selected gates path. Deployment remains governed by the procedure below.
 - **Escalation cadence windows (repository head)** — `cadence.marker_span` lets one marker discharge several rounds; window anchor decides the required kind, log-derived counter decides expiry, `since=` pins evidence freshness to the BLOCK that opened the window. Bounded by `sdp-regression.sh` and registered as NC-29.

@@ -2480,6 +2480,34 @@ def _doctor_gate_state(root: Path, lines: list[str]) -> bool:
     return healthy
 
 
+def _same_dir(recorded: str, running: str) -> bool:
+    """Do two path strings name the same directory?
+
+    A plain `==` was wrong on macOS, where `/tmp` and `/var` are firmlinks onto
+    `/private/tmp` and `/private/var`. `sdp-anchor.sh` records the LOGICAL path
+    (bash `pwd`), while the engine derives its own via `Path.resolve()`, which is
+    PHYSICAL -- so a checkout under any aliased prefix compared unequal forever
+    and `doctor` reported a freshly-anchored project as STALE. Cloning to
+    `/tmp/sdp`, which is the obvious thing to do, was enough to turn the smoke
+    suite red on a correct install.
+
+    samefile is the authority when both paths exist (it compares st_dev/st_ino,
+    so it sees through firmlinks, symlinks and bind mounts alike). When the
+    recorded directory is gone -- the case this whole check exists to report --
+    fall back to comparing resolved strings, which still normalises the alias.
+    """
+    if recorded == running:
+        return True
+    try:
+        return os.path.samefile(recorded, running)
+    except OSError:
+        pass
+    try:
+        return Path(recorded).resolve(strict=False) == Path(running).resolve(strict=False)
+    except (OSError, ValueError):
+        return False
+
+
 def _doctor_anchor(root: Path, lines: list[str]) -> None:
     """Report whether the project's .sdp_runtime.env still names THIS engine.
 
@@ -2521,7 +2549,7 @@ def _doctor_anchor(root: Path, lines: list[str]) -> None:
     if not recorded_root:
         lines.append(f"  anchor: MALFORMED (no SDP_ROOT in {env_path})")
         return
-    if recorded_root == running_root:
+    if _same_dir(recorded_root, running_root):
         detail = f"{recorded_ver or 'version unrecorded'}"
         if anchored_at:
             detail += f", anchored {anchored_at}"

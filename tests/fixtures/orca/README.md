@@ -11,6 +11,11 @@ machine-identifying value has been replaced with a generic one:
 
 - the capturing machine's home path → `/Users/dev`, everywhere it appeared
   (worktree paths, `created_by_process_incarnation` strings, etc.)
+- every credential-derived digest: `capability_hash` and `launch_token_hash`
+  in `worker-show-settled.json` were live values computed from a real launch
+  token. They are replaced with reproducible synthetic digests
+  (`sha256("sdp-fixture:<field>")`), which keep the shape the parser expects
+  without publishing anything derived from a credential
 - the local Orca desktop app's `runtimeId` (a persistent per-install id that
   appeared, identically, in every single fixture's `_meta`): replaced with
   the fixed placeholder `00000000-0000-4000-8000-000000000000`

@@ -48,7 +48,7 @@ $sdp:batch-sdp 사용자 관리 기능 전체 구현
 | 값 | 동작 |
 |---|---|
 | `agent_tool` (기본) | 각 세그먼트를 이 세션의 서브에이전트로 실행. 추가 도구 불필요. |
-| `tmux_long_lived` | 배치당 `tmux` 안에 장기 실행 `claude` 세션 1개를 띄우고 세그먼트 프롬프트를 밀어 넣음. `tmux`와 `claude`가 `PATH`에 있어야 하며, 없으면 `agent_tool`로 폴백. |
+| `tmux_long_lived` | 배치당 `tmux` 안에 장기 실행 **Codex** 워커 세션 1개를 띄우고 세그먼트 프롬프트를 밀어 넣음. `tmux`·`codex`·`git`이 `PATH`에 있고 cwd가 git 체크아웃이어야 하며, 없으면 `agent_tool`로 폴백. Claude Code는 리뷰 게이트에만 쓰인다. |
 
 세그먼트 완료 신호는 `STATUS.md` 파일이다. 터미널 화면을 긁지 않는다.
 
@@ -83,7 +83,7 @@ $sdp:worktree-dispatch TASKS.md의 작업목록을 병렬 실행
 | 값 | 동작 |
 |---|---|
 | `manual` (기본) | 작업별 핸드오버 문서를 만들고, 실행은 사용자가 직접 띄운다. |
-| `auto` | worktree마다 headless 세션을 자동 생성. `tmux`와 `claude` 필요, 없으면 `manual`로 폴백. |
+| `auto` | worktree마다 headless **Codex** 세션을 자동 생성. `tmux`·`codex`·`git` 필요, 없으면 `manual`로 폴백. |
 
 worktree 세션은 검증 체크리스트까지만 만든다. 런타임·화면 테스트는 머지 후 main에서 직렬로 돈다(`worktree.runtime_isolation: serial_main`). 프로젝트가 worktree별 임시 런타임을 선택하면 달라진다.
 

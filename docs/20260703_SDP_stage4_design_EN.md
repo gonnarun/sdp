@@ -110,7 +110,7 @@ Change:
      verdict path = POSIX awk/grep only (node lives only in optional companion)
    ```
 2. **De-domain the PROMPT**: core keeps universal items (REQ coverage · current-state reflection · scope match · over-permission · unauthorized external send · trust-boundary · secret/PII baseline). Domain items (MariaDB/lombok/@DataScopeFilter/INVARIANTS) come from `review_checklist_include`.
-3. **Paths** `.references/임시/{YYYYMMDD}` → `${BASE_DIR}/${DATE}/gate/` from `.sdp_runtime.env`; thread-file name includes a `pwd` hash (REQ-G-04, worktree git-dir sharing).
+3. **Paths** the legacy dated deliverable directory → `${BASE_DIR}/${DATE}/gate/` from `.sdp_runtime.env`; thread-file name includes a `pwd` hash (REQ-G-04, worktree git-dir sharing).
 
 **Verdict states (REQ-G-06)** — three outcomes drive the exit + escalation:
 ```
@@ -170,7 +170,7 @@ Rename + de-domain in one pass. "De-domain" = replace stack/DB literals with `${
 | Stage6_test_plan.md | Phase4 | 7 | `${test.*}` refs |
 | Stage7_test_exec.md | Phase5 | 19 | `${test.*}`/DB-guard refs; heaviest |
 | Stage8_verification.md | Phase6 | 2 | generic name; screen-test = T2/T3 sub-tier |
-| SDP.md | Project-A SOP.md | 16 | strip tenant_id/Flyway/gradle/start.sh → project-rules.md; renumber |
+| SDP.md | Project-A SOP.md | 16 | strip the project-specific domain literals → project-rules.md; renumber |
 
 **Stage 4 authoring rules** (emitted by `Stage4_design_plan.md` at runtime): design section is inline by default; **promote** to a standalone `design_{feature}.md` + **one early design gate** when impact=High OR blast-radius exceeded (new module/service, cross-cut beyond N files, large brownfield delta) — REQ-D-02; when trivial, a one-line `design trivial: {reason}` (logged). Meaningful decisions are recorded as compact **ADRs** (decision + alternatives + rationale + status: proposed/accepted/superseded), standalone only when promoted — REQ-D-03.
 
@@ -182,7 +182,7 @@ Anchoring resolves `OUTPUT_LOCALE`. Authoring rule (in Stage templates, prompt-l
 - `batch-sdp.md` — anchor → split scope → per-segment full SDP-flow via engine adapter (`agent_tool` default / `tmux_long_lived` opt-in); unattended 4-charter; global concurrency cap.
 - `worktree-dispatch.md` — anchor → Stage 1 only with user → per-task handover; sessions run full SDP-flow in worktrees, produce checklists only (no screen test); main merges + screen-tests serially. Port the existing Project-F command's invariants verbatim.
   - **Shared-surface contract (REQ-C-05)**: before dispatch, main writes once a design skeleton / data-model contract covering only shared surfaces (schema · shared modules · trust boundaries) into each handover; each session designs task-local beneath it → parallel worktrees can't diverge on shared schema/modules.
-  - **`dispatch_mode: manual | auto` (REQ-C-07, default `manual` per D-17)**: `manual` = print handover, user opens+pastes (today). `auto` = main auto-launches each task via `run_segment_tmux.sh` (`git worktree add` → tmux `claude --permission-mode bypassPermissions` in the worktree → inject handover → §0-A unattended full SDP-flow → 완료기록 to main `base_dir` → incremental integration trigger). **Guards**: (a) if the project's codex auto-mode classifier blocks headless/tmux/bypass loops (§4.6), fall back to `manual`/`agent_tool`; (b) runtime-touching stages need `ephemeral_per_worktree` else stay checklist-only + main serial; (c) one-time `bypassPermissions` grant + K-cap + hard deadline + kill switch (reuse the watcher safety pattern). Gate strength identical to manual.
+  - **`dispatch_mode: manual | auto` (REQ-C-07, default `manual` per D-17)**: `manual` = print handover, user opens+pastes (today). `auto` = main auto-launches each task via `run_segment_tmux.sh` (`git worktree add` → tmux `claude --permission-mode bypassPermissions` in the worktree → inject handover → §0-A unattended full SDP-flow → completion record to main `base_dir` → incremental integration trigger). **Guards**: (a) if the project's codex auto-mode classifier blocks headless/tmux/bypass loops (§4.6), fall back to `manual`/`agent_tool`; (b) runtime-touching stages need `ephemeral_per_worktree` else stay checklist-only + main serial; (c) one-time `bypassPermissions` grant + K-cap + hard deadline + kill switch (reuse the watcher safety pattern). Gate strength identical to manual.
 
 ### 3.9 Cross-cutting safety (NFR)
 - **No-weakening base keys** (REQ-U-04): the config loader rejects a `forced_ext` that turns a base safety key off; base keys may only strengthen.
