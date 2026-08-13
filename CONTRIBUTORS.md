@@ -15,7 +15,10 @@ GitHub derives from commit metadata and nobody can edit by hand.
 
 ## Contributors
 
-- [@grboy6770](https://github.com/grboy6770)
+- [@grboy6770](https://github.com/grboy6770) — `worktree-dispatch`, the way the
+  requirement stages are structured, and error-path testing of the review gate.
+  Much of this arrived as design input rather than as a diff, which is the kind
+  of contribution this file exists to record.
 
 ## Adding yourself
 
