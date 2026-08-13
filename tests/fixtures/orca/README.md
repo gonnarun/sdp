@@ -13,9 +13,12 @@ machine-identifying value has been replaced with a generic one:
   (worktree paths, `created_by_process_incarnation` strings, etc.)
 - every credential-derived digest: `capability_hash` and `launch_token_hash`
   in `worker-show-settled.json` were live values computed from a real launch
-  token. They are replaced with reproducible synthetic digests
-  (`sha256("sdp-fixture:<field>")`), which keep the shape the parser expects
-  without publishing anything derived from a credential
+  token. They are replaced with **fixed, deliberately low-entropy placeholders**
+  (`000…001` and `000…002`), which keep the 64-hex shape the parser expects
+  while publishing nothing derived from a credential. Low entropy is the point:
+  a random-looking 64-hex value under a `*_token_hash` key is what a secret
+  scanner flags, so a realistic-looking synthetic digest trades one problem for
+  another
 - the local Orca desktop app's `runtimeId` (a persistent per-install id that
   appeared, identically, in every single fixture's `_meta`): replaced with
   the fixed placeholder `00000000-0000-4000-8000-000000000000`
