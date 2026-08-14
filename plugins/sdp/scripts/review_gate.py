@@ -1600,12 +1600,24 @@ def _compose_marker(
 
 
 def _record_marker_command(root: Path, artifact: Path, decision: str, fields: dict[str, str]) -> str:
-    # One shell word per line with trailing backslashes. NO `date` invocation
-    # appears anywhere in it (D-14): `%6N` is a GNU extension that BSD `date`
-    # emits LITERALLY with exit 0, so a documented `||` fallback never fires. The
-    # timestamp is generated in Python by _now_z() at write time.
+    # ONE line, absolute, directly runnable. It used to be one shell word per
+    # line with trailing backslashes and a bare `review_gate.py` -- so the human
+    # who opened the request file still had to supply `python3`, work out which
+    # of the several coexisting plugin-cache versions to point at, and reassemble
+    # ten lines. That is friction with no security value: the control is that the
+    # command NEVER reaches stdout (an agent must not be able to scrape and run
+    # it), and that record-marker itself demands a TTY and the human token. Both
+    # survive verbatim; only the retyping is gone.
+    #
+    # sys.executable and __file__ pin the SAME engine that composed the request,
+    # which is also what stops a stale cache version from being run by accident.
+    #
+    # NO `date` invocation appears anywhere in it (D-14): `%6N` is a GNU extension
+    # that BSD `date` emits LITERALLY with exit 0, so a documented `||` fallback
+    # never fires. The timestamp is generated in Python by _now_z() at write time.
     words = [
-        "review_gate.py", "--cwd", str(root), "record-marker", str(artifact),
+        _shq(sys.executable), _shq(str(Path(__file__).resolve())),
+        "--cwd", _shq(str(root)), "record-marker", _shq(str(artifact)),
         "--marker-decision", decision,
     ]
     for name in MARKER_FIELDS:
@@ -1613,7 +1625,7 @@ def _record_marker_command(root: Path, artifact: Path, decision: str, fields: di
             words.extend([f"--marker-{name}", _shq(fields[name])])
     if decision in STATE_CHANGING_DECISIONS:
         words.append(CONFIRM_FLAG)
-    return " \\\n".join(words)
+    return " ".join(words)
 
 
 def _write_request(dest: Path, text: str) -> None:
