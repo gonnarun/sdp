@@ -137,6 +137,80 @@ printf '%s' "$out" | head -1 | grep -q '\.marker-request$' \
 printf '%s' "$out" | grep -q '^PASS ' && ok "T2: stdout carries the PASS/FAIL checklist" \
   || bad "T2: no checklist on stdout"
 
+# ============================================================== T44 ===========
+# The request file's Command section is a CONTRACT, and until now nothing pinned
+# it: T2 only asserts the command never reaches stdout, T15 only that it invokes
+# no date(1). A regression to the old shape -- one shell word per line with
+# trailing backslashes, beginning with a bare `review_gate.py` -- passed every
+# existing assertion while leaving the human to supply `python3`, pick among the
+# coexisting plugin-cache versions, and reassemble ten lines by hand.
+#
+# (a) exactly one line. (b) it starts with an absolute interpreter and an
+# absolute engine path, so it is runnable as-is and pinned to the engine that
+# composed it. (c) it survives shlex round-trip with awkward-but-ACCEPTED input.
+# ADR-G02 refuses internal whitespace in every field except summary=, so the
+# quoting stress goes where the grammar actually permits it: a space and a single
+# quote in the project and artifact PATHS, a single quote (no space) in roster=,
+# and both in summary=.
+python3 - "$REQ" <<'PYCMD' && ok "T44: the emitted command is a single line" \
+  || bad "T44: the Command section is not exactly one line (multi-line form regressed)"
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().split("## Command\n", 1)[1].splitlines()
+body = [l for l in lines if l.strip() and not l.startswith("#")]
+sys.exit(0 if len(body) == 1 else 1)
+PYCMD
+python3 - "$REQ" <<'PYABS' && ok "T44: it begins with an absolute interpreter and an absolute engine path" \
+  || bad "T44: command does not start with absolute sys.executable + resolved review_gate.py"
+import shlex, sys, os
+body = [l for l in open(sys.argv[1], encoding="utf-8").read().split("## Command\n", 1)[1].splitlines()
+        if l.strip() and not l.startswith("#")][0]
+argv = shlex.split(body)
+# argv[0] must be THIS interpreter, not merely something absolute whose basename
+# looks like python: a regression to a hardcoded /usr/bin/python3 would satisfy a
+# shape check while silently running a different interpreter than the one that
+# composed and validated the request.
+ok = (len(argv) > 2
+      and os.path.isabs(argv[0])
+      and os.path.realpath(argv[0]) == os.path.realpath(sys.executable)
+      and os.path.isabs(argv[1]) and argv[1].endswith("review_gate.py")
+      and argv[1] == os.path.realpath(argv[1]))
+sys.exit(0 if ok else 1)
+PYABS
+
+# Round-trip over a project whose path carries a space AND a single quote.
+QP="$TMP/awk ward'dir"
+QART="$QP/pl an's.md"
+mkdir -p "$QP/.sdp"; printf 'plan\n' > "$QART"
+gates "$QP" 99
+i=1; while [ "$i" -le 2 ]; do set_claude_verdict "BLOCK: q$i"
+  H --cwd "$QP" --reviewer claude review "$QART" >/dev/null 2>&1; i=$((i + 1)); done
+gates "$QP" 2
+printf 'evidence\n' > "$QP/ev.md"
+QLOG="$(H --cwd "$QP" --print-state-path "$QART")"
+QREQ="${QLOG%.log}.marker-request"
+H --cwd "$QP" prepare-marker "$QART" \
+  --marker-roster "o'brien,bob" --marker-outputs ev.md \
+  --marker-summary "two lenses agreed it's the root cause" >/dev/null 2>&1
+python3 - "$QREQ" "$QP" "$QART" <<'PYRT' && ok "T44: shlex round-trip preserves spaces and quotes in paths, roster and summary" \
+  || bad "T44: quoting is lossy -- the pasted command would not reproduce the original argv"
+import shlex, sys
+import os
+req, proj = sys.argv[1], sys.argv[2]   # sys.argv[3] = the artifact
+body = [l for l in open(req, encoding="utf-8").read().split("## Command\n", 1)[1].splitlines()
+        if l.strip() and not l.startswith("#")][0]
+argv = shlex.split(body)
+def val(flag):
+    return argv[argv.index(flag) + 1]
+# --cwd carries the RESOLVED root, so compare physically: on macOS the fixture
+# lives under a /var firmlink and a logical-vs-physical == would fail here for a
+# reason that has nothing to do with quoting.
+ok = (os.path.realpath(val("--cwd")) == os.path.realpath(proj)
+      and os.path.realpath(val("record-marker")) == os.path.realpath(sys.argv[3])
+      and val("--marker-roster") == "o'brien,bob"
+      and val("--marker-summary") == "two lenses agreed it's the root cause")
+sys.exit(0 if ok else 1)
+PYRT
+
 # ============================================================== T15 ===========
 grep -qE '(^|[^[:alnum:]_])date([^[:alnum:]_]|$)' "$REQ" \
   && bad "T15: the request file contains a date(1) invocation (BSD emits %6N literally)" \

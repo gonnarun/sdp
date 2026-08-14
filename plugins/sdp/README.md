@@ -262,9 +262,11 @@ Planner-solo is a hard block across the entire 6+ range — the gate refuses to 
 - `review_gate.py --cwd DIR prepare-marker <artifact> --marker-roster a,b --marker-outputs p1,p2` — composes the marker and writes a request file.
 - `review_gate.py --cwd DIR record-marker <artifact> --marker-*` — appends the marker to the gate log.
 
-`prepare-marker` writes a request file for a human to read; `record-marker` is the only command that writes to a gate log, and it requires a terminal and a human-provisioned token.
+`prepare-marker` writes a request file for a human to read; `record-marker` is the only command that writes to a gate log, and it requires a terminal and a human-provisioned token. The request file carries the exact command as a single runnable line, pinned to the engine that composed it — open it and paste.
 
 The marker is honor-plus-evidence: the gate checks roster cardinality, distinctness and output freshness, but the log is agent-writable same-uid and forgery cannot be fully prevented (`review_gate.py:1103-1104`).
+
+**What `--marker-roster` should name.** The gate checks that the roster holds at least two **distinct entries** — a lone member, planner or otherwise, is refused, which is what "no planner-solo" means in practice. It does **not** check who those entries are or that a review happened, so the names are a claim you are accountable for. Name the **Agent-team roles that actually examined the artifact** — Planner, Evaluator, Explorer, Researcher, Designer, Runner, Security — each from its own angle, and cite what they produced in `--marker-outputs`. Escalation exists to replace one model looking again with several perspectives looking once. **Do not list `agy`**: it is the infrastructure fallback for the primary reviewer, not a team member.
 
 Running `record-marker` twice is safe and the **second marker wins**: both lines stay in the log as an audit trail, and only the last is consumed by the escalation check. `--marker-decision pivot` and `--marker-decision halt` change gate state and additionally require `--i-am-recording-a-state-changing-decision` and a typed confirmation phrase.
 

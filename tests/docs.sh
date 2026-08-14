@@ -132,6 +132,18 @@ launder="$(grep -rnE '>>[^|]*\.log|\b(mv|rm)\b[^|]*\.halt' $SHIPPED_DOCS 2>/dev/
   && ok "(iv) no shipped file redirects into a .log or mv/rm's a .halt (operator procedures stay root-only)" \
   || bad "(iv) a shipped file carries a laundering recipe -> $launder"
 
+# ---- roster composition must reach the README, not only core/ ---------------
+# The rule that a roster names real Agent-team roles and excludes agy went into
+# core/SDP.md first. A public reader who follows only the README would see the
+# `a,b` example and invent the rest -- which is how `agy` got into real rosters
+# in the first place. README-only usability is a stated goal, so pin it in BOTH.
+for f in README.md plugins/sdp/README.md; do
+  { grep -qF 'What `--marker-roster` should name' "$f" \
+    && grep -qF 'Do not list `agy`' "$f"; } \
+    && ok "$f states roster composition and excludes agy" \
+    || bad "$f omits the roster composition rule (core/SDP.md has it; README does not)"
+done
+
 # ---- (v) no relative docs/ link in the plugin README ------------------------
 grep -qF '](docs/' plugins/sdp/README.md \
   && bad "(v) plugins/sdp/README.md links a relative docs/ path that does not exist in that tree" \
