@@ -373,5 +373,54 @@ done
   && ok "(xii) Orca pins Codex worker" \
   || bad "(xii) Orca worker agent remains overrideable"
 
+# ---- (xiii) Config discovery is never described as project-local-only ------
+# An agent that reads only "in `.sdp/defaults.yaml`" concludes "no file -> unset/manual"
+# even when discovery selected a user-global file. Every agent-read doc that names a
+# config key must say the selected file may be user-global, and must name the
+# unset-XDG fallback, because that is the candidate real installs actually hit.
+for f in commands/worktree-dispatch.md plugins/sdp/commands/worktree-dispatch.md \
+         commands/batch-sdp.md plugins/sdp/commands/batch-sdp.md \
+         COMMAND_MANUAL.md; do
+  { grep -qF 'anchor-selected `defaults.yaml`' "$f" \
+    && grep -qF '~/.config/sdp/' "$f"; } \
+    && ok "(xiii) $f: config source is described as anchor-selected with the unset-XDG fallback" \
+    || bad "(xiii) $f: config source described as project-local only (reintroduces the false 'manual mode' report)"
+done
+# The two entry points a dispatched agent reads first must spell the order out in full,
+# not just reference it, and must state that a user-global file counts.
+for f in commands/worktree-dispatch.md plugins/sdp/commands/worktree-dispatch.md COMMAND_MANUAL.md; do
+  { grep -qF 'project `scripts/sdp/`' "$f" \
+    && grep -qF 'passwd-home `~/.sdp/`' "$f" \
+    && grep -qF 'explicitly set' "$f" \
+    && grep -qiF 'user-global file counts' "$f"; } \
+    && ok "(xiii) $f: full discovery order incl. unset-XDG fallback and user-global precedence" \
+    || bad "(xiii) $f: discovery order incomplete"
+done
+# The read-only core header resolves ${...} literals; it must not pin them to a
+# project-local path either.
+for f in core/SDP.md plugins/sdp/core/SDP.md; do
+  { grep -qF 'anchor-selected' "$f" \
+    && ! grep -qF 'literals are resolved from `.sdp/defaults.yaml`' "$f"; } \
+    && ok "(xiii) $f: core header names the anchor-selected config, not a project-local path" \
+    || bad "(xiii) $f: core header pins literals to a project-local .sdp/defaults.yaml"
+done
+# Negative guard: no agent-read doc may still route a config key through a bare
+# project-local path. A positive-token check alone is too weak — one sentence reverting
+# to the old wording hides behind the other sentences in the same file.
+for f in commands/worktree-dispatch.md plugins/sdp/commands/worktree-dispatch.md \
+         commands/batch-sdp.md plugins/sdp/commands/batch-sdp.md \
+         core/SDP.md plugins/sdp/core/SDP.md \
+         COMMAND_MANUAL.md COMMAND_MANUAL.ko.md; do
+  n=$(grep -cE 'in `\.sdp/defaults\.yaml`|from `\.sdp/defaults\.yaml`|`\.sdp/defaults\.yaml`의' "$f" || true)
+  [ "$n" = "0" ] \
+    && ok "(xiii) $f: no config key sourced from a bare project-local .sdp/defaults.yaml" \
+    || bad "(xiii) $f: $n config reference(s) still name only the project-local .sdp/defaults.yaml"
+done
+# Korean manual carries the same two semantic tokens (translation-independent).
+{ grep -qF '앵커가 선택한 `defaults.yaml`' COMMAND_MANUAL.ko.md \
+  && grep -qF '~/.config/sdp/' COMMAND_MANUAL.ko.md; } \
+  && ok "(xiii) COMMAND_MANUAL.ko.md mirrors the discovery semantics" \
+  || bad "(xiii) COMMAND_MANUAL.ko.md missing the discovery semantics"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

@@ -41,7 +41,7 @@ Splits a large scope into independent segments, then runs the full SDP workflow 
 $sdp:batch-sdp implement the complete user management feature
 ```
 
-Engine is selected by `dispatch.batch_engine` in `.sdp/defaults.yaml`:
+Engine is selected by `dispatch.batch_engine` in the **anchor-selected** `defaults.yaml`. Discovery runs project `.sdp/` → project `scripts/sdp/` → `$XDG_CONFIG_HOME/sdp/` **only when that variable is explicitly set, otherwise passwd-home `~/.config/sdp/`** → passwd-home `~/.sdp/`. The first **safe, existing** candidate wins; a present but unsafe or unreadable one aborts discovery rather than falling through. A user-global file counts: a missing project-local `.sdp/defaults.yaml` does **not** mean the key is unset, and with `XDG_CONFIG_HOME` unset the file actually read is usually `~/.config/sdp/defaults.yaml`. See [Configuration](README.md#configuration) for the no-weakening and fail-closed rules.
 
 | Value | Behavior |
 |---|---|
@@ -76,7 +76,7 @@ $sdp:worktree-dispatch run the task list in TASKS.md in parallel
 
 **Preconditions.** The tasks must not share dependencies, modified files, database state, or ports. If they do, use `batch-sdp` instead.
 
-Mode is selected by `dispatch.worktree_mode`:
+Mode is selected by `dispatch.worktree_mode` in the anchor-selected `defaults.yaml` — same discovery order and same fail-closed rule as `dispatch.batch_engine` above, so `manual` means *the selected file sets no mode*, not *no project-local file exists*:
 
 | Value | Behavior |
 |---|---|
@@ -112,4 +112,4 @@ All commands write under the configured `base_dir` (default `.private/sdp-artifa
 .private/sdp-artifacts/{YYYY-MM-DD}/{topic}/{doc-type}
 ```
 
-`.private/` is created and added to `.gitignore` automatically on first run. Deliverable language follows `output_locale` in `.sdp/defaults.yaml` (`auto` = the language of your environment).
+`.private/` is created and added to `.gitignore` automatically on first run. Deliverable language follows `output_locale` in the anchor-selected `defaults.yaml` — same discovery order as above (`auto` = the language of your environment).

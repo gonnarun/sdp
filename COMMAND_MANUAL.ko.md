@@ -43,7 +43,7 @@ $sdp:sdp 로그인 실패 횟수 제한 기능 구현
 $sdp:batch-sdp 사용자 관리 기능 전체 구현
 ```
 
-엔진은 `.sdp/defaults.yaml`의 `dispatch.batch_engine`으로 고른다.
+엔진은 **앵커가 선택한** `defaults.yaml`의 `dispatch.batch_engine`으로 고른다. 탐색 순서는 프로젝트 `.sdp/` → 프로젝트 `scripts/sdp/` → `XDG_CONFIG_HOME`가 **명시적으로 설정된 경우에만** `$XDG_CONFIG_HOME/sdp/`, 아니면 passwd-home `~/.config/sdp/` → passwd-home `~/.sdp/`. 처음 발견된 **안전하고 존재하는** 후보가 이긴다. 후보가 있으나 안전하지 않거나 읽을 수 없으면 다음으로 넘어가지 않고 중단한다. 사용자 전역 파일도 유효하다. 프로젝트 로컬 `.sdp/defaults.yaml`이 없다고 해서 키가 미설정인 것은 **아니며**, `XDG_CONFIG_HOME`이 미설정이면 실제로 읽히는 파일은 보통 `~/.config/sdp/defaults.yaml`이다. no-weakening·fail-closed 규칙은 [Configuration](README.md#configuration) 참조.
 
 | 값 | 동작 |
 |---|---|
@@ -78,7 +78,7 @@ $sdp:worktree-dispatch TASKS.md의 작업목록을 병렬 실행
 
 **전제 조건** — 작업 간에 의존성, 수정 파일, DB 상태, 포트가 겹치면 안 된다. 겹치면 `batch-sdp`를 쓴다.
 
-모드는 `dispatch.worktree_mode`로 고른다.
+모드는 앵커가 선택한 `defaults.yaml`의 `dispatch.worktree_mode`로 고른다 — 탐색 순서와 fail-closed 규칙은 위 `dispatch.batch_engine`과 같다. 즉 `manual`은 *선택된 파일이 모드를 지정하지 않았다*는 뜻이지, *프로젝트 로컬 파일이 없다*는 뜻이 아니다.
 
 | 값 | 동작 |
 |---|---|
@@ -114,4 +114,4 @@ $sdp:precompact login-limit
 .private/sdp-artifacts/{YYYY-MM-DD}/{주제}/{문서유형}
 ```
 
-`.private/`는 최초 실행 시 자동 생성되고 `.gitignore`에 등록된다. 산출물 언어는 `.sdp/defaults.yaml`의 `output_locale`을 따른다(`auto` = 실행 환경 언어).
+`.private/`는 최초 실행 시 자동 생성되고 `.gitignore`에 등록된다. 산출물 언어는 앵커가 선택한 `defaults.yaml`의 `output_locale`을 따른다(탐색 순서는 위와 동일, `auto` = 실행 환경 언어).

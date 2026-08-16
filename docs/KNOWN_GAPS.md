@@ -10,7 +10,7 @@ _Last reviewed: 2026-08-12._
 
 **Status: ported; two residual gaps remain (below).**
 
-`scripts/run_segment_tmux.sh` has been **ported and corrected to launch Codex implementation workers**. Claude Code is review-gate only. Config keys `dispatch.batch_engine` / `dispatch.worktree_mode` remain in `.sdp/defaults.yaml`; adapters fall back when `tmux`/`codex`/`git` are absent (exit `5`) or the worker cwd is not a git checkout (exit `3`).
+`scripts/run_segment_tmux.sh` has been **ported and corrected to launch Codex implementation workers**. Claude Code is review-gate only. Config keys `dispatch.batch_engine` / `dispatch.worktree_mode` remain in the anchor-selected `defaults.yaml` (project-local or user-global); adapters fall back when `tmux`/`codex`/`git` are absent (exit `5`) or the worker cwd is not a git checkout (exit `3`).
 
 - **`batch-sdp` `tmux_long_lived`** (REQ-C-03) — backed; `commands/batch-sdp.md` drives `init`/`continue`/`shutdown`.
 - **`worktree-dispatch` `auto`** (REQ-C-07) — backed; `commands/worktree-dispatch.md` drives per-worktree `init` with `SDP_SESSION_CWD` set to the worktree.
@@ -31,7 +31,7 @@ Referenced (advertised) at: `docs/20260703_SDP_requirements_definition_EN.md` RE
 
 REQ-U-08 / AC-14 define `output_locale: auto` as "English canonical original **+** a synced env-locale copy when the locale ≠ en", versus a fixed `<locale>` which is a single-language deliverable. But `scripts/sdp-anchor.sh` (lines ~48–58) **collapses `auto` into the resolved environment locale** and writes only a single `OUTPUT_LOCALE=<lang>` into `.sdp_runtime.env`. Therefore `OUTPUT_LOCALE` alone **cannot distinguish** `auto` (dual output) from a fixed `<locale>` (single output).
 
-**Workaround (in place):** the P4 authoring rule in `core/SDP.md` §"Deliverable authoring language (i18n) — REQ-U-08" and the per-Stage anchors instruct the author to read the **mode** from the `output_locale` key in `.sdp/defaults.yaml`, and use `OUTPUT_LOCALE` only for the target language.
+**Workaround (in place):** the P4 authoring rule in `core/SDP.md` §"Deliverable authoring language (i18n) — REQ-U-08" and the per-Stage anchors instruct the author to read the **mode** from the `output_locale` key in the anchor-selected `defaults.yaml`, and use `OUTPUT_LOCALE` only for the target language.
 
 **To close:** have `sdp-anchor.sh` emit the raw mode (e.g. `OUTPUT_LOCALE_MODE=auto|en|fixed`) alongside the resolved locale, so the dual-vs-single decision is available at runtime without re-reading config. (Behavior change — out of scope for the doc-only pass.)
 
