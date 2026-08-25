@@ -178,7 +178,7 @@ User-global config works across repositories with no setup in each repo. Add `.s
 | **`/sdp`** | A single task, start to finish. | Full SDP workflow inline in the current session, serial. Small tasks take a fast-path. |
 | **`/batch-sdp`** | A large scope that should be split and run unattended. | Splits into segments and delegates them (Agent-tool by default; long-lived tmux opt-in). |
 | **`/worktree-dispatch`** | Several independent tasks in parallel. | You do only Stage 1 (interview); each task gets a handover that another session runs as the full SDP workflow in its own git worktree. |
-| **`/precompact`** | Manual context compaction prep. | Writes a gitignored progress snapshot and prints a resume prompt for the next context. |
+| **`/precompact`** | Context compaction prep. | Writes a gitignored progress snapshot and prints a resume prompt. With the shipped hooks armed, the snapshot is taken and the resume is injected automatically around compaction. |
 
 The first three share **one SDP core** — identical Stage 1–8, identical two gates, identical evaluator PASS. Parallelism never weakens the gate. `/precompact` is a utility command and does not run the SDP core.
 

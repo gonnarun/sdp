@@ -104,6 +104,32 @@ $sdp:precompact login-limit
 
 **사용 시점** — 컨텍스트가 차올라서 다음 세션이 깔끔하게 이어받아야 할 때.
 
+### 자동 모드 (Claude 호스트)
+
+플러그인은 compact와 다음 프롬프트를 이어붙이는 훅 3개를 함께 배포한다. 손으로 칠 것이 없다.
+
+1. **`Stop`** — 세션 트랜스크립트에서 실제 컨텍스트 사용량을 읽는다. 임계치를 넘으면 `decision: block`을 돌려줌으로써 모델에게 도구 사용이 가능한 턴을 한 번 더 주고 스냅샷 작성을 지시한다.
+2. **`PreCompact`** — 방금 작성된 스냅샷을 해당 `session_id`에 묶는다. 같은 디렉토리의 다른 세션이 엉뚱한 스냅샷으로 재개하는 사고를 막는다.
+3. **`SessionStart`** (matcher `compact`) — compact 직후 스냅샷 경로와 재개 지시를 `additionalContext`로 주입하고, 마커를 지워 다음 사이클을 다시 무장한다.
+
+자동 compact 직후에는 호스트가 턴을 스스로 이어가므로 사용자 입력 없이 작업이 재개된다. 수동 `/compact`의 경우에는 주입된 컨텍스트가 다음 메시지에서 사용된다.
+
+사용자가 켜기 전까지는 꺼져 있고, 미설정은 결코 켜진 것으로 간주하지 않는다.
+
+```bash
+PLUGIN="$(ls -d ~/.claude/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)"
+python3 "${PLUGIN}scripts/precompact_hook.py" config set auto   # 또는 manual
+python3 "${PLUGIN}scripts/precompact_hook.py" doctor            # 상태 진단
+```
+
+`doctor`는 미충족 조건을 전부 출력하고 non-zero로 종료한다. 반만 설치된 자동화가 성공을 보고하는 상황을 만들지 않는다. `SDP_PRECOMPACT_TRANSCRIPT=<세션 .jsonl>`을 주면 실제 세션을 측정해 차단 여부까지 알려준다.
+
+임계치 기본값은 컨텍스트 창의 78%로, 호스트 자체 auto-compact 지점보다 낮게 잡아 스냅샷이 경주에서 이기도록 했다. `SDP_PRECOMPACT_THRESHOLD` 또는 `~/.sdp/precompact.json`의 `threshold`로 바꾼다.
+
+컨텍스트 창 크기 자체는 추론해야 한다. 훅에는 사용량 필드가 오지 않고, 트랜스크립트에 기록되는 모델 id는 200k 세션이든 1M 세션이든 동일하다. 그래서 그 세션이 실제로 도달한 최대 점유량(기록된 compact 포함)을 먼저 보고, 다음으로 설정된 `[1m]` 모델을 보며, 한 세션 안에서 다시 좁아지지 않는다. 아직 한 번도 compact하지 않았고 어디에도 wide 모델이 적히지 않은 세션은 필요보다 이르게 스냅샷을 요청할 수 있다. `SDP_PRECOMPACT_CONTEXT_TOKENS`(또는 호스트의 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`)로 못박으면 된다.
+
+Codex는 이 라이프사이클 훅을 제공하지 않으므로 해당 호스트에서는 수동으로 남는다.
+
 ---
 
 ## 산출물 위치

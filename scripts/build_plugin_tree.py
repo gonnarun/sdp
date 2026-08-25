@@ -6,7 +6,7 @@ window (P2 -> P11) this generator emits the root mirror so every payload edit
 lands once, in the canonical tree, instead of twice. Option A deletes this
 generator together with the root mirror at P12.
 
-Scope: ``scripts/``, ``skills/``, ``commands/``. ``core/`` is EXCLUDED from the
+Scope: ``scripts/``, ``skills/``, ``commands/``, ``hooks/``. ``core/`` is EXCLUDED from the
 mirror: the two ``core/`` trees are host-specialized on reviewer DIRECTION only
 (root/Claude host -> codex reviewer via ``review_gate.py``; plugin/codex host ->
 Claude reviewer via the MCP ``claude_review_gate``). The 3-state POLICY semantics
@@ -59,7 +59,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL = ROOT / "plugins" / "sdp"
 
-SUBTREES = ("scripts", "skills", "commands")
+SUBTREES = ("scripts", "skills", "commands", "hooks")
 
 # Host-divergent MCP manifests: the codex copy is DERIVED from the Claude copy.
 CLAUDE_MCP = CANONICAL / ".mcp.json"          # ${CLAUDE_PLUGIN_ROOT}, no cwd

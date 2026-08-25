@@ -12,13 +12,19 @@ Create a gitignored snapshot of current in-progress work before manual compact, 
 ## Workflow
 
 1. Gather measured context. Do not rely on memory: in-progress work, completed work in this session (`git log --oneline origin/<branch>..HEAD` plus changed files), current diff, remaining steps, open or edited files with line references, pitfalls already hit, and open questions. If data is unavailable, write `unknown`. Leave no blank sections.
-2. Save the in-progress snapshot to `.private/precompact/{YYYYMMDD}/precompact_{topic}.md`.
+2. Save the in-progress snapshot to `.private/precompact/{YYYYMMDD}/precompact_{topic}.md`. If the request came from the Claude-host automation it names a session tag and asks for `precompact_{topic}_{tag}.md`; use that exact name, since it is what tells two sessions writing into the same directory apart.
    - `{YYYYMMDD}` is today's absolute date. Do not use relative dates.
    - Create the directory if missing.
    - `.private/` is gitignored by project standard. No separate backup or commit needed.
    - Use the structure below. If the same topic file already exists, ask before overwriting.
 3. Print the resume prompt to chat only. Do not save it to any file.
-4. Finish with one clickable Markdown link to the snapshot path and tell the user to paste the printed prompt as the first message after manual compact.
+4. Finish with one clickable Markdown link to the snapshot path. If the SDP precompact hooks are armed on this host, say that the resume happens automatically after compaction and that the printed prompt is only a fallback; otherwise tell the user to paste the printed prompt as the first message after manual compact.
+
+## Automation
+
+On the Claude host the plugin ships three hooks (`hooks/hooks.json`) that close the loop between compaction and the next prompt: a `Stop` hook that reads context usage from the session transcript and answers `decision: block` past the threshold so the model gets one more turn to write the snapshot, a `PreCompact` hook that binds that snapshot to this `session_id`, and a `SessionStart` (`compact`) hook that injects the snapshot path as `additionalContext` after compaction. Codex does not expose these lifecycle hooks, so on this host the command is manual: run it yourself before compacting, and paste the printed resume prompt afterwards.
+
+Mode lives in `~/.sdp/precompact.json` and is off until set. `python3 <plugin>/scripts/precompact_hook.py config set auto` turns it on; `doctor` reports health.
 
 ## Snapshot Structure
 

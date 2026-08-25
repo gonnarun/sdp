@@ -102,6 +102,52 @@ $sdp:precompact login-limit
 
 **Use it when** the context window is filling up and you want the next session to pick up cleanly.
 
+### Automatic mode (Claude host)
+
+The plugin ships three hooks that link compaction to the next prompt, so nothing
+has to be typed by hand:
+
+1. **`Stop`** reads context usage from the session transcript. Past the threshold
+   it answers `decision: block`, which gives the model one more tool-capable turn
+   and tells it to write the snapshot.
+2. **`PreCompact`** binds that snapshot to this `session_id`, so a second session
+   working in the same directory cannot resume the wrong snapshot.
+3. **`SessionStart`** (matcher `compact`) injects the snapshot path and resume
+   instructions as `additionalContext`, then clears the marker so the cycle
+   re-arms.
+
+After an automatic compaction the host continues the turn on its own, so the work
+resumes with no user input. After a manual `/compact` the injected context is used
+on the next message instead.
+
+It is off until each user turns it on, and an unset mode is never treated as on:
+
+```bash
+PLUGIN="$(ls -d ~/.claude/plugins/cache/sdp-marketplace/sdp/*/ | sort -V | tail -1)"
+python3 "${PLUGIN}scripts/precompact_hook.py" config set auto   # or manual
+python3 "${PLUGIN}scripts/precompact_hook.py" doctor            # health report
+```
+
+`doctor` exits non-zero and names every unmet precondition, so a half-installed
+automation cannot report success. Pass `SDP_PRECOMPACT_TRANSCRIPT=<session .jsonl>`
+to have it measure a real session and say whether it would block.
+
+The threshold defaults to 78 percent of the context window — below the host's own
+auto-compact point, so the snapshot wins the race. Override it with
+`SDP_PRECOMPACT_THRESHOLD`, or `threshold` in `~/.sdp/precompact.json`.
+
+The window itself has to be inferred: hooks receive no context-usage field, and the
+model id recorded in a transcript is the same whether the session has a 200k or a
+1M window. It is taken from the largest occupancy the session has actually reached
+(including any recorded compaction), then from a configured `[1m]` model, and it
+never narrows again within a session. A session that has never compacted and names
+no wide model anywhere can therefore ask for a snapshot earlier than it needs to;
+set `SDP_PRECOMPACT_CONTEXT_TOKENS` (or the host's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`)
+to settle it outright.
+
+Codex does not expose these lifecycle hooks, so on that host the command stays
+manual.
+
 ---
 
 ## Where the output goes
