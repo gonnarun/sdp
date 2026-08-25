@@ -66,6 +66,12 @@ After an automatic compaction the host continues the turn on its own, so the
 injected context is acted on with no user input. After a manual `/compact` the
 host returns to the prompt and the same context is used on the next message.
 
+Both hosts support these three events and both auto-load a plugin's
+`hooks/hooks.json`, so the same manifest drives Claude Code and Codex. Codex
+skips a plugin's hooks until they are trusted: run `/hooks` there once and
+accept them, or they stay registered-but-inert. `doctor` cannot see that from
+outside the host, so it reports configuration only and tells you what to check.
+
 Automation is off until it is turned on, per user, in `~/.sdp/precompact.json`.
 An unset mode is not `auto`.
 

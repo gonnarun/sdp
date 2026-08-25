@@ -145,8 +145,31 @@ no wide model anywhere can therefore ask for a snapshot earlier than it needs to
 set `SDP_PRECOMPACT_CONTEXT_TOKENS` (or the host's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`)
 to settle it outright.
 
-Codex does not expose these lifecycle hooks, so on that host the command stays
-manual.
+Both hosts support these three events and both auto-load a plugin's
+`hooks/hooks.json`, so one manifest drives Claude Code and Codex. Two host
+differences remain. Codex **skips a plugin's hooks until they are trusted** —
+run `/hooks` there once and accept them, or they stay registered and never
+fire. And the two hosts write different transcripts: Claude records
+per-assistant `message.usage`, Codex records `token_count` events, and
+occupancy is read from `last_token_usage.input_tokens` against the
+`model_context_window` Codex states outright (never `total_token_usage`, which
+is the cumulative session bill). Both come from the **same, newest** event: a
+session can change model mid-flight, and dividing the latest usage by the
+widest window the session ever had reads 210k of a 258400 window as 21% instead
+of 81% — the threshold is never crossed and the snapshot is never taken.
+
+A window the host states this way is used as-is. The remembered widen-only
+window and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` are both devices for the case where
+the window has to be inferred, and neither overrules it; a Claude-only variable
+exported into a Codex session must not decide that session's window.
+`SDP_PRECOMPACT_CONTEXT_TOKENS` remains the one override that outranks
+everything, on either host.
+
+Neither transcript format is a documented interface; if one changes,
+measurement returns nothing and the hook stays silent rather than guessing.
+
+`doctor` cannot see whether the host actually registered the hooks, so it
+reports configuration only and names what to check.
 
 ---
 

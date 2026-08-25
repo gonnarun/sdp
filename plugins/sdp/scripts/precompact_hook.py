@@ -127,14 +127,6 @@ def passwd_home() -> Path:
     return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
 
 
-def sdp_home() -> Path:
-    return passwd_home() / SDP_HOME_DIRNAME
-
-
-def config_path() -> Path:
-    return sdp_home() / CONFIG_BASENAME
-
-
 def _selftest_override(name: str) -> str:
     """A path seam that exists only for the suite.
 
@@ -161,6 +153,15 @@ def _selftest_override(name: str) -> str:
     except (OSError, ValueError, KeyError):
         return ""
     return str(resolved)
+
+
+def sdp_home() -> Path:
+    override = _selftest_override("SDP_PRECOMPACT_HOME")
+    return Path(override) if override else passwd_home() / SDP_HOME_DIRNAME
+
+
+def config_path() -> Path:
+    return sdp_home() / CONFIG_BASENAME
 
 
 def state_dir() -> Path:
@@ -260,7 +261,8 @@ def write_mode(mode: str) -> str:
         float(current.get("threshold"))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         current["threshold"] = DEFAULT_THRESHOLD_PCT
-    _write_json(config_path(), current)
+    if not _write_json(config_path(), current):
+        raise OSError("could not write " + str(config_path()))
     return mode
 
 
@@ -269,16 +271,33 @@ def write_mode(mode: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _env_window(name: str) -> int | None:
+    try:
+        value = int(os.environ.get(name))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def explicit_window() -> int | None:
-    """A window the operator stated outright. Overrides every inference."""
-    for name in ("SDP_PRECOMPACT_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_CONTEXT_TOKENS"):
-        try:
-            value = int(os.environ.get(name))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
+    """A window the operator stated outright, for this plugin, on any host.
+
+    Deliberately separate from the host's own variable: this one is the
+    documented escape hatch and outranks everything, including a window a host
+    states exactly.
+    """
+    return _env_window("SDP_PRECOMPACT_CONTEXT_TOKENS")
+
+
+def claude_host_window() -> int | None:
+    """Claude Code's own window override.
+
+    Applies only where the window has to be inferred. Codex states its window
+    on every token_count event, and a Claude-specific variable that happens to
+    be exported must not overrule a number the running host just reported --
+    that reads a 258400-token session as though it had a million to spare.
+    """
+    return _env_window("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
 
 
 def _settings_says_wide(cwd: str = "") -> bool:
@@ -313,22 +332,46 @@ def _settings_says_wide(cwd: str = "") -> bool:
     return False
 
 
-def context_limit(model: str | None, observed_tokens: int = 0, cwd: str = "") -> int:
+def context_limit(
+    model: str | None,
+    observed_tokens: int = 0,
+    cwd: str = "",
+    declared_window: int = 0,
+) -> int:
     """Usable context window in tokens.
 
-    Hook stdin carries no context-usage field and a plugin cannot ship a
-    statusLine, so the window has to be inferred from what is on disk. The
-    model id in the transcript is NOT reliable for this: a wide-window session
-    records plain ``claude-opus-5``, with no ``[1m]`` marker, so trusting it
-    would under-read the window by 5x and fire on nearly every turn.
+    Codex states the window on the same event it reports usage on, and that
+    number arrives here as ``declared_window``. Claude states nothing: hook
+    stdin carries no context-usage field and a plugin cannot ship a statusLine,
+    so on that host the window has to be inferred from what is on disk. The
+    model id is NOT usable for that -- a wide-window session records plain
+    ``claude-opus-5`` with no ``[1m]`` marker, so trusting it would under-read
+    the window by 5x and fire on nearly every turn.
 
-    Order: an explicit override wins; then the largest context this session has
-    actually reached, which cannot lie; then the user's model setting; then the
-    narrow default.
+    Precedence, highest first:
+
+    1. ``SDP_PRECOMPACT_CONTEXT_TOKENS`` -- this plugin's own override, the
+       documented escape hatch on either host.
+    2. ``declared_window`` -- a window the host stated for the request just
+       measured. Everything below it is guesswork by comparison.
+    3. ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` -- Claude Code's own override. Below
+       the declared window on purpose: exported into a Codex session it must
+       not decide that session's window.
+    4. The largest occupancy this session has actually reached, which cannot
+       lie about being at least that wide.
+    5. A configured ``[1m]`` model, from the environment or a settings file.
+    6. The narrow default.
     """
     explicit = explicit_window()
     if explicit is not None:
         return explicit
+    # A window the host stated for the request just measured. Nothing below can
+    # improve on it, and everything below is guesswork by comparison.
+    if declared_window > 0:
+        return declared_window
+    host = claude_host_window()
+    if host is not None:
+        return host
     # Self-calibration. Occupancy already past the narrow window is proof of a
     # wide one, whatever the model id claims.
     if observed_tokens > DEFAULT_CONTEXT_TOKENS * 0.98:
@@ -358,20 +401,74 @@ def _tail_lines(path: Path, max_bytes: int = 2_000_000) -> list[str]:
     return blob.decode("utf-8", "replace").splitlines()
 
 
+def _codex_usage(record: dict) -> tuple[int, int]:
+    """Occupancy and declared window from one Codex rollout line.
+
+    Codex writes ``{"type":"event_msg","payload":{"type":"token_count", ...}}``.
+    Inside ``payload.info``, ``last_token_usage.input_tokens`` is the prompt
+    size for the most recent request -- the resident context, cached portion
+    included. ``total_token_usage`` is the cumulative bill for the session and
+    reaches millions; using it would read every session as instantly full.
+    ``model_context_window`` states the window outright.
+
+    This shape is not a documented interface and can change with the CLI. It is
+    read defensively and pinned by a recorded fixture in tests/precompact.sh;
+    if it ever stops matching, measurement degrades to zero rather than lying,
+    and the hook simply never fires on that host.
+    """
+    if record.get("type") != "event_msg":
+        return (0, 0)
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return (0, 0)
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return (0, 0)
+    last = info.get("last_token_usage")
+    used = 0
+    if isinstance(last, dict):
+        try:
+            used = int(last.get("input_tokens") or 0)
+        except (TypeError, ValueError):
+            used = 0
+    try:
+        window = int(info.get("model_context_window") or 0)
+    except (TypeError, ValueError):
+        window = 0
+    return (used, window)
+
+
 def measure_context(
     transcript_path: str | None, cwd: str = ""
-) -> tuple[float, int, int, str | None]:
-    """Return (pct, used_tokens, limit, model) from the newest usage record.
+) -> tuple[float, int, int, str | None, bool]:
+    """Return (pct, used_tokens, limit, model, exact) from the newest usage record.
 
-    The transcript records per-assistant-message usage. Context occupancy is
-    input + cache_creation + cache_read; output tokens are not resident.
+    ``exact`` is True when ``limit`` is a window the host stated for this
+    measurement rather than one inferred from history. Callers use it to skip
+    the sticky window, which has nothing to add to a number the host reported.
+
+    Two transcript formats, because the plugin runs on two hosts. Claude writes
+    per-assistant-message ``message.usage``, where occupancy is
+    input + cache_creation + cache_read (output tokens are not resident) and
+    the window is never stated. Codex writes ``token_count`` events carrying
+    both the occupancy and the window.
+
+    The Codex window is read from the SAME event as the occupancy, never as the
+    largest window seen. A session can change model mid-flight, and taking the
+    widest window ever reported alongside the newest usage divides the two by
+    each other: 210k of a 258400 window reads as 21% instead of 81%, and the
+    snapshot is never requested. Pairing them is the whole point.
+
+    Neither format is a stable interface; both are read defensively so an
+    unrecognised line measures nothing rather than measuring wrong.
     """
     if not transcript_path:
-        return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None)
+        return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None, False)
 
     latest_used: int | None = None
     latest_model: str | None = None
     peak_used = 0
+    declared_window = 0
 
     # Reverse order so the newest usable record is found first, but keep
     # scanning: the peak occupancy over the whole tail is what calibrates the
@@ -385,6 +482,16 @@ def measure_context(
         except ValueError:
             continue
         if not isinstance(record, dict):
+            continue
+        # Codex rollout
+        codex_used, codex_window = _codex_usage(record)
+        if codex_used:
+            if codex_used > peak_used:
+                peak_used = codex_used
+            if latest_used is None:
+                # Newest usable event wins, and its window comes with it.
+                latest_used = codex_used
+                declared_window = codex_window
             continue
         # A recorded compaction states exactly how much context was resident at
         # the moment it fired. That is the strongest window evidence available
@@ -430,11 +537,12 @@ def measure_context(
             latest_model = model
 
     if latest_used is None:
-        return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None)
+        return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None, False)
 
-    limit = context_limit(latest_model, peak_used, cwd)
+    limit = context_limit(latest_model, peak_used, cwd, declared_window)
+    exact = declared_window > 0 and limit == declared_window
     pct = (latest_used / limit * 100.0) if limit > 0 else 0.0
-    return (pct, latest_used, limit, latest_model)
+    return (pct, latest_used, limit, latest_model, exact)
 
 
 # --------------------------------------------------------------------------
@@ -673,11 +781,17 @@ def hook_stop() -> int:
         return 0
 
     threshold = resolve_threshold()
-    pct, used, limit, model = measure_context(
+    pct, used, limit, model, exact = measure_context(
         payload.get("transcript_path"), payload.get("cwd") or ""
     )
-    limit = sticky_window(session_id, limit)
-    pct = (used / limit * 100.0) if limit > 0 else 0.0
+    # The sticky window exists because Claude's window can only be inferred and
+    # the evidence for a wide one scrolls out of view. Where the host states the
+    # window outright there is nothing to remember, and remembering would be
+    # actively wrong: a session that moved to a narrower model would keep being
+    # measured against the wider one it used to have.
+    if not exact:
+        limit = sticky_window(session_id, limit)
+        pct = (used / limit * 100.0) if limit > 0 else 0.0
     if pct < threshold:
         if marker:
             clear_marker(session_id)
@@ -751,15 +865,22 @@ def hook_precompact() -> int:
         tag = marker.get("tag") or session_tag(session_id)
         allow_recency = False
     else:
-        # Manual route: the user ran /sdp:precompact and then /compact, so there
-        # is no marker and no inventory. Only the tag can bind here, and the
-        # user is unlikely to have typed it, so fall back to recency -- the
-        # manual route is a deliberate act by someone who knows what they wrote.
+        # No marker. On a MANUAL compaction that means the user ran
+        # /sdp:precompact themselves and then /compact, so recency is a
+        # reasonable last resort -- a deliberate act by someone who knows what
+        # they just wrote.
+        #
+        # On an AUTOMATIC compaction it means the opposite: the Stop hook never
+        # recorded a request, so this session has no claim on anything in the
+        # directory. Recency there would bind whatever happens to be newest,
+        # which on a shared directory is as likely to be another session's.
+        # That path is reachable whenever detection is silent -- an unreadable
+        # transcript format, for instance -- so it must bind nothing.
         floor = now - UNBOUND_FRESH_SEC
         cwd = payload.get("cwd")
         exclude = None
         tag = session_tag(session_id)
-        allow_recency = True
+        allow_recency = payload.get("trigger") == "manual"
 
     snapshot = find_snapshot(cwd, floor, tag, exclude, allow_recency)
     if snapshot is None and not marker:
@@ -870,18 +991,28 @@ def cmd_doctor() -> int:
 
     transcript = os.environ.get("SDP_PRECOMPACT_TRANSCRIPT")
     if transcript:
-        pct, used, limit, model = measure_context(transcript)
+        pct, used, limit, model, exact = measure_context(transcript)
         # A transcript is named for its session, and the hook applies the
         # session's remembered window on top of the measurement. Reporting the
         # raw measurement would contradict what the hook actually decides.
         sid = Path(transcript).stem
-        if sid:
+        if sid and not exact:
             limit = sticky_window(sid, limit)
             pct = (used / limit * 100.0) if limit > 0 else 0.0
-        out("measured context  : %d / %d tokens (%.1f%%), model %s\n" % (used, limit, pct, model))
+        out(
+            "measured context  : %d / %d tokens (%.1f%%), model %s, window %s\n"
+            % (used, limit, pct, model, "host-stated" if exact else "inferred")
+        )
         out("would block       : %s\n" % ("yes" if pct >= resolve_threshold() else "no"))
     else:
         out("measured context  : pass SDP_PRECOMPACT_TRANSCRIPT=<session .jsonl> to measure\n")
+
+    # Whether the host has actually registered these hooks is not observable
+    # from here. Codex skips a plugin's hooks until they are trusted in /hooks,
+    # and saying "armed" without that check is the same overclaim that let the
+    # design this replaces report success while its detector was dead.
+    out("hook trust        : not verifiable from here; on Codex the plugin's\n")
+    out("                    hooks stay skipped until trusted via /hooks\n")
 
     markers = []
     if state_dir().is_dir():
@@ -896,7 +1027,9 @@ def cmd_doctor() -> int:
     out("live markers      : %s\n" % (", ".join(markers) or "none"))
 
     if problems == 0:
-        out("OK    precompact automation is armed.\n")
+        out("OK    configuration is armed. Confirm the host registered the hooks:\n")
+        out("        Claude -- /hooks lists this plugin's Stop, PreCompact and SessionStart\n")
+        out("        Codex  -- /hooks shows them trusted, not skipped\n")
     else:
         out("%d problem(s) found.\n" % problems)
     return 1 if problems else 0
@@ -912,6 +1045,11 @@ def cmd_config(argv: list[str]) -> int:
         except ValueError as exc:
             sys.stderr.write(str(exc) + "\n")
             return 2
+        except OSError as exc:
+            # Reporting success here is how someone ends up believing the
+            # automation is armed when nothing was saved.
+            sys.stderr.write("failed to save mode: " + str(exc) + "\n")
+            return 1
         return 0
     sys.stderr.write("usage: precompact_hook.py config [get | set auto|manual]\n")
     return 2

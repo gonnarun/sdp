@@ -356,7 +356,7 @@ bash tests/run.sh --fast              # regen-check + orphan-detector + packagin
 bash tests/run.sh                     # full suite (every layer in .sdp/defaults.yaml)
 ```
 
-`plugins/sdp/` is the single source of truth for `scripts/` / `skills/` / `commands/`; the root copies are **generated**. Edit the canonical tree, then `python3 scripts/build_plugin_tree.py`. `tests/run.sh --fast` fails on a stale mirror, so a hand-edited root copy cannot be committed. The pre-commit hook runs the fast suite and bumps the Codex plugin manifests as an install-cache cachebuster.
+`plugins/sdp/` is the single source of truth for `scripts/` / `skills/` / `commands/` / `hooks/`; the root copies are **generated**. Edit the canonical tree, then `python3 scripts/build_plugin_tree.py`. `tests/run.sh --fast` fails on a stale mirror, so a hand-edited root copy cannot be committed. The pre-commit hook runs the fast suite and bumps the Codex plugin manifests as an install-cache cachebuster.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full workflow.
 

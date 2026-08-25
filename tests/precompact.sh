@@ -89,11 +89,11 @@ PY
 
 # Fail-close: an unset mode must never behave as auto. This is the single gate
 # that keeps the automation from firing for someone who never opted in.
-out="$(printf '{"session_id":"t-unset","transcript_path":"","cwd":""}' \
+out="$(printf '{"session_id":"unset-sdp-precompact-selftest-gate","transcript_path":"","cwd":""}' \
   | SDP_PRECOMPACT_MODE= python3 "$HOOK_CANONICAL" stop 2>/dev/null)"
 [ -z "$out" ] && ok "unset mode does not block (fail-close)" || bad "unset mode produced output: $out"
 
-out="$(printf '{"session_id":"t-manual","transcript_path":"","cwd":""}' \
+out="$(printf '{"session_id":"manual-sdp-precompact-selftest-gate","transcript_path":"","cwd":""}' \
   | SDP_PRECOMPACT_MODE=manual python3 "$HOOK_CANONICAL" stop 2>/dev/null)"
 [ -z "$out" ] && ok "manual mode does not block" || bad "manual mode produced output: $out"
 
@@ -669,6 +669,168 @@ PY
 drop "$STATE_ONE"
 find "$ONEDIR" -maxdepth 1 -type f -delete 2>/dev/null || true
 
+# ---------------------------------------------------------- codex rollout --
+
+# Codex writes a different transcript format, so the same measurement has to
+# work against it. Shape captured from codex-cli 0.149.1; the numbers are
+# synthetic. This is not a documented interface -- the fixture is here so a
+# format change is caught as a test failure rather than as a hook that quietly
+# never fires.
+cat > "$TMP/codex.jsonl" <<'JSONL'
+{"timestamp":"2026-08-25T03:00:00.000Z","type":"session_meta","payload":{"id":"01a03000-0000-7000-0000-000000000000"}}
+{"timestamp":"2026-08-25T03:10:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000000,"cached_input_tokens":3900000,"output_tokens":18000,"total_tokens":4018000},"last_token_usage":{"input_tokens":90000,"cached_input_tokens":88000,"output_tokens":100,"total_tokens":90100},"model_context_window":258400}}}
+{"timestamp":"2026-08-25T03:20:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4600000,"cached_input_tokens":4300000,"output_tokens":18370,"total_tokens":4618370},"last_token_usage":{"input_tokens":210000,"cached_input_tokens":209000,"output_tokens":101,"total_tokens":210101},"model_context_window":258400}}}
+JSONL
+
+SID_CX="codex-sdp-precompact-selftest-$$"; STATE_CX="$(mkstate "$SID_CX")"; drop "$STATE_CX"
+# 210000 of a declared 258400 window is 81%, past the 78% threshold.
+out="$(run_stop "$SID_CX" "$TMP/codex.jsonl")"
+[ -n "$out" ] && ok "a Codex rollout is measured and blocks past the threshold" \
+  || bad "the Codex transcript format was not measured (parser did not match)"
+python3 - "$STATE_CX" <<'PY' && ok "Codex occupancy comes from last_token_usage, and the window is the declared one" || bad "Codex measurement used the wrong fields"
+import json, sys
+d = json.load(open(sys.argv[1]))
+# total_token_usage is the cumulative session bill (millions) -- reading it
+# would report every session as instantly full.
+raise SystemExit(0 if d.get("used_tokens") == 210000 and d.get("context_limit") == 258400 else 1)
+PY
+drop "$STATE_CX"
+
+# Below the threshold the same fixture must stay quiet, which pins that the
+# window really is the declared 258400 and not an inferred default.
+cat > "$TMP/codex-low.jsonl" <<'JSONL'
+{"timestamp":"2026-08-25T03:20:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4600000,"cached_input_tokens":4300000,"output_tokens":18370,"total_tokens":4618370},"last_token_usage":{"input_tokens":170000,"cached_input_tokens":169000,"output_tokens":101,"total_tokens":170101},"model_context_window":258400}}}
+JSONL
+SID_CXL="codexlow-sdp-precompact-selftest-$$"; STATE_CXL="$(mkstate "$SID_CXL")"; drop "$STATE_CXL"
+out="$(run_stop "$SID_CXL" "$TMP/codex-low.jsonl")"
+[ -z "$out" ] && ok "170k of a declared 258400 window is under threshold" \
+  || bad "blocked at 66% -- the declared window was ignored"
+drop "$STATE_CXL"
+
+# An unrecognisable transcript must measure nothing rather than something
+# wrong: the hook then simply never fires on that host.
+printf '{"type":"event_msg","payload":{"type":"agent_message","message":"hi"}}\n' > "$TMP/codex-unknown.jsonl"
+SID_CXU="codexunk-sdp-precompact-selftest-$$"; STATE_CXU="$(mkstate "$SID_CXU")"; drop "$STATE_CXU"
+out="$(run_stop "$SID_CXU" "$TMP/codex-unknown.jsonl")"
+[ -z "$out" ] && ok "an unreadable transcript measures nothing instead of guessing" \
+  || bad "an unreadable transcript produced a block"
+drop "$STATE_CXU"
+
+# A Codex session can change model mid-flight, and each token_count event
+# states the window that applied to THAT request. Taking the widest window ever
+# seen and dividing the newest usage by it is fail-open: 210k of a 258400
+# window reads as 21%, the threshold is never crossed, and the snapshot is
+# never requested. The pair has to come from one event.
+cat > "$TMP/codex-switched.jsonl" <<'JSONL'
+{"timestamp":"2026-08-25T03:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000000},"last_token_usage":{"input_tokens":300000},"model_context_window":1000000}}}
+{"timestamp":"2026-08-25T03:20:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4600000},"last_token_usage":{"input_tokens":210000},"model_context_window":258400}}}
+JSONL
+SID_SW="cxswitch-sdp-precompact-selftest-$$"; STATE_SW="$(mkstate "$SID_SW")"; drop "$STATE_SW"
+out="$(run_stop "$SID_SW" "$TMP/codex-switched.jsonl")"
+[ -n "$out" ] && ok "after a switch to a narrower model the newest window is used (210k of 258400 blocks)" \
+  || bad "an earlier wider window was reused -- 81% occupancy measured as 21%, snapshot missed"
+python3 - "$STATE_SW" <<'PY' && ok "the recorded limit is the newest event's window, not the widest seen" || bad "the marker recorded a stale window"
+import json, sys
+d = json.load(open(sys.argv[1]))
+raise SystemExit(0 if d.get("context_limit") == 258400 and d.get("used_tokens") == 210000 else 1)
+PY
+drop "$STATE_SW"
+
+# The sticky window is a Claude-only device: it exists because Claude's window
+# can only be inferred. A remembered wide value must not survive onto a host
+# that states its window, or the same fail-open returns by another route.
+SID_SWS="cxsticky-sdp-precompact-selftest-$$"; STATE_SWS="$(mkstate "$SID_SWS")"; drop "$STATE_SWS"
+mkdir -p "$(dirname "$STATE_SWS")"
+printf '{"limit":1000000,"at":%s}' "$(date +%s)" > "${STATE_SWS%.json}.window.json"
+out="$(run_stop "$SID_SWS" "$TMP/codex-switched.jsonl")"
+[ -n "$out" ] && ok "a remembered wide window does not override a host-stated one" \
+  || bad "the sticky window overrode an exact window and suppressed the block"
+drop "$STATE_SWS"
+
+# CLAUDE_CODE_MAX_CONTEXT_TOKENS is the other host's override. Exported into a
+# Codex session it must not overrule the window Codex just reported.
+SID_CXE="cxenv-sdp-precompact-selftest-$$"; STATE_CXE="$(mkstate "$SID_CXE")"; drop "$STATE_CXE"
+out="$(run_stop "$SID_CXE" "$TMP/codex-switched.jsonl" CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000)"
+[ -n "$out" ] && ok "a Claude-only window override does not overrule a host-stated Codex window" \
+  || bad "CLAUDE_CODE_MAX_CONTEXT_TOKENS overrode the exact Codex window"
+drop "$STATE_CXE"
+
+# The plugin's own override is the documented escape hatch and still outranks
+# everything, including an exact window.
+SID_CXO="cxover-sdp-precompact-selftest-$$"; STATE_CXO="$(mkstate "$SID_CXO")"; drop "$STATE_CXO"
+out="$(run_stop "$SID_CXO" "$TMP/codex-switched.jsonl" SDP_PRECOMPACT_CONTEXT_TOKENS=1000000)"
+[ -z "$out" ] && ok "SDP_PRECOMPACT_CONTEXT_TOKENS still outranks a host-stated window" \
+  || bad "the documented cross-host override stopped working"
+drop "$STATE_CXO"
+
+# The reverse switch, so the rule reads as "newest" and not as "narrowest".
+cat > "$TMP/codex-widened.jsonl" <<'JSONL'
+{"timestamp":"2026-08-25T03:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200000},"model_context_window":258400}}}
+{"timestamp":"2026-08-25T03:20:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":210000},"model_context_window":1000000}}}
+JSONL
+SID_WD="cxwiden-sdp-precompact-selftest-$$"; STATE_WD="$(mkstate "$SID_WD")"; drop "$STATE_WD"
+out="$(run_stop "$SID_WD" "$TMP/codex-widened.jsonl")"
+[ -z "$out" ] && ok "after a switch to a wider model the newest window is used (210k of 1M is quiet)" \
+  || bad "an earlier narrower window was reused and produced a spurious block"
+drop "$STATE_WD"
+
+# ------------------------------------------------ compaction without a marker --
+
+# Detection can be silent -- an unreadable transcript is exactly that case --
+# and then an automatic compaction arrives with no marker. This session has no
+# claim on anything in the directory, so binding the newest file would bind
+# whatever another session happened to write.
+SID_AN="autonomark-sdp-precompact-selftest-$$"; STATE_AN="$(mkstate "$SID_AN")"; drop "$STATE_AN"
+find "$PROJ/.private/precompact/$DAY" -maxdepth 1 -type f -delete 2>/dev/null || true
+printf 'someone elses\n' > "$PROJ/.private/precompact/$DAY/precompact_other_session.md"
+printf '{"session_id":"%s","cwd":"%s","trigger":"auto"}' "$SID_AN" "$PROJ" \
+  | SDP_PRECOMPACT_MODE=auto python3 "$HOOK_CANONICAL" precompact >/dev/null 2>&1
+if [ -f "$STATE_AN" ]; then
+  python3 - "$STATE_AN" <<'PY' && ok "an automatic compaction with no marker binds nothing" || bad "auto compaction with no marker bound a foreign snapshot"
+import json, sys
+raise SystemExit(0 if not json.load(open(sys.argv[1])).get("snapshot") else 1)
+PY
+else
+  ok "an automatic compaction with no marker binds nothing"
+fi
+drop "$STATE_AN"
+
+# The manual route is unchanged: the user ran /sdp:precompact themselves, so a
+# single recent snapshot is theirs.
+SID_MN="manualnomark-sdp-precompact-selftest-$$"; STATE_MN="$(mkstate "$SID_MN")"; drop "$STATE_MN"
+printf '{"session_id":"%s","cwd":"%s","trigger":"manual"}' "$SID_MN" "$PROJ" \
+  | SDP_PRECOMPACT_MODE=manual python3 "$HOOK_CANONICAL" precompact >/dev/null 2>&1
+python3 - "$STATE_MN" <<'PY' && ok "a manual compaction with no marker still binds the one recent snapshot" || bad "the manual route stopped binding"
+import json, os, sys
+if not os.path.exists(sys.argv[1]):
+    raise SystemExit(1)
+raise SystemExit(0 if "precompact_other_session" in json.load(open(sys.argv[1])).get("snapshot", "") else 1)
+PY
+drop "$STATE_MN"
+find "$PROJ/.private/precompact/$DAY" -maxdepth 1 -type f -delete 2>/dev/null || true
+
+# ------------------------------------------------------------ config set --
+
+# Reporting a saved mode that was not saved is how someone ends up believing
+# the automation is armed while nothing is.
+# The real ~/.sdp/precompact.json must be untouched by this case. An earlier
+# revision of it wrote there for real and silently armed the developer's own
+# machine, so its state is captured and asserted rather than assumed.
+REAL_CFG="$(python3 -c 'import os,pwd;print(pwd.getpwuid(os.getuid()).pw_dir)')/.sdp/precompact.json"
+REAL_CFG_BEFORE="absent"; [ -f "$REAL_CFG" ] && REAL_CFG_BEFORE="$(cat "$REAL_CFG")"
+CFGGUARD="$SELFTEST_HOME/cfgguard"; mkdir -p "$CFGGUARD"
+printf 'not a directory\n' > "$CFGGUARD/blocked"
+if SDP_PRECOMPACT_SELFTEST=1 SDP_PRECOMPACT_STATE_DIR="$CFGGUARD/blocked" \
+   SDP_PRECOMPACT_HOME="$CFGGUARD/blocked" python3 "$HOOK_CANONICAL" config set auto >/dev/null 2>&1; then
+  bad "config set reported success although the mode could not be saved"
+else
+  ok "config set fails loudly when the mode cannot be saved"
+fi
+REAL_CFG_AFTER="absent"; [ -f "$REAL_CFG" ] && REAL_CFG_AFTER="$(cat "$REAL_CFG")"
+[ "$REAL_CFG_BEFORE" = "$REAL_CFG_AFTER" ] \
+  && ok "the failing config-set case never touches the real config file" \
+  || bad "config set wrote the real ~/.sdp/precompact.json (fixture escaped the seam)"
+
 # ------------------------------------------------------- marker robustness --
 
 # A clock step backwards leaves a marker dated in the future. Subtracting from
@@ -694,6 +856,51 @@ out="$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","stop_hook_a
   | SDP_PRECOMPACT_STATE_DIR="$GUARD/blocked" SDP_PRECOMPACT_CONTEXT_TOKENS=200000 SDP_PRECOMPACT_MODE=auto python3 "$HOOK_CANONICAL" stop 2>/dev/null)"
 [ -z "$out" ] && ok "no block is emitted when the marker cannot be persisted" \
   || bad "blocked without a persisted marker (would repeat every turn)"
+
+# ------------------------------------------------------------ doc semantics --
+
+# Codex supports Stop, PreCompact and SessionStart(compact) and auto-loads a
+# plugin's hooks/hooks.json (codex-cli 0.149.1, feature `hooks` stable). The
+# earlier claim that it did not was wrong, and it is the kind of statement that
+# quietly stops people enabling the thing.
+for f in commands/precompact.md plugins/sdp/commands/precompact.md \
+         skills/precompact/SKILL.md plugins/sdp/skills/precompact/SKILL.md \
+         .agents/skills/precompact/SKILL.md .codex/prompts/precompact.md \
+         COMMAND_MANUAL.md COMMAND_MANUAL.ko.md; do
+  if grep -qiE "Codex does not expose|Codex는 이 라이프사이클 훅을 제공하지 않" "$f"; then
+    bad "$f still claims Codex has no lifecycle hooks"
+  else
+    ok "$f does not claim Codex lacks lifecycle hooks"
+  fi
+done
+
+# Codex skips a plugin's hooks until they are trusted, so a reader who is told
+# the automation works but not that it must be trusted is left with a silently
+# inert install -- the exact failure this feature was written to end.
+for f in .codex/prompts/precompact.md COMMAND_MANUAL.md; do
+  grep -qF '/hooks' "$f" && ok "$f names the Codex trust step" || bad "$f omits the Codex trust step"
+done
+grep -qF '/hooks' COMMAND_MANUAL.ko.md && ok "COMMAND_MANUAL.ko.md names the Codex trust step" \
+  || bad "COMMAND_MANUAL.ko.md omits the Codex trust step"
+
+# The Codex measurement reads last_token_usage, never the cumulative bill.
+# Saying so in the shipped docs is what stops the next reader "fixing" it.
+grep -qF 'last_token_usage' COMMAND_MANUAL.md && ok "COMMAND_MANUAL.md names the Codex usage field" \
+  || bad "COMMAND_MANUAL.md does not say which Codex field is read"
+grep -qF 'total_token_usage' COMMAND_MANUAL.md && ok "COMMAND_MANUAL.md warns off the cumulative field" \
+  || bad "COMMAND_MANUAL.md does not warn off total_token_usage"
+
+# The pairing rule is the difference between measuring 81% and measuring 21%,
+# so the docs must state it rather than implying the window is a session-wide
+# constant.
+for f in COMMAND_MANUAL.md .codex/prompts/precompact.md; do
+  grep -qi 'newest' "$f" \
+    && ok "$f says the usage and window come from the same newest event" \
+    || bad "$f does not state the usage/window pairing rule"
+done
+grep -q '가장 최근' COMMAND_MANUAL.ko.md \
+  && ok "COMMAND_MANUAL.ko.md states the usage/window pairing rule" \
+  || bad "COMMAND_MANUAL.ko.md does not state the usage/window pairing rule"
 
 # ------------------------------------------------------------------ doctor --
 
