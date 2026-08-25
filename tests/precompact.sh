@@ -335,12 +335,30 @@ out="$(run_stop "$SID_HOSTENV" "$TMP/transcript.jsonl" CLAUDE_CODE_MAX_CONTEXT_T
   || bad "CLAUDE_CODE_MAX_CONTEXT_TOKENS was ignored"
 drop "$STATE_HOSTENV"
 
-# The model-setting hint, isolated from the runner's real settings file.
-printf '{"model":"opus[1m]"}' > "$TMP/settings-wide.json"
+# The model-setting hint, isolated from the runner's real settings file. The
+# fixture MUST live under $HOME: the seam refuses a path outside it, and a
+# refused override falls back to the real ~/.claude/settings.json -- which on a
+# developer machine may itself name [1m] and satisfy this for the wrong reason.
+# CI has no such file, which is where that mistake surfaces.
+# Both fixtures come from ONE variable so they cannot drift apart. If HINTDIR
+# ever moves outside $HOME the seam refuses it and BOTH fall back to the real
+# ~/.claude/settings.json -- the negative case below then contradicts the
+# positive one, which is what makes the mistake visible instead of silent.
+HINTDIR="$SELFTEST_HOME"
+printf '{"model":"opus[1m]"}' > "$HINTDIR/settings-wide.json"
+printf '{"model":"opus"}'     > "$HINTDIR/settings-narrow.json"
 SID_HINT="hint-sdp-precompact-selftest-$$"; STATE_HINT="$(mkstate "$SID_HINT")"; drop "$STATE_HINT"
-out="$(run_stop "$SID_HINT" "$TMP/transcript.jsonl" SDP_PRECOMPACT_SETTINGS="$TMP/settings-wide.json")"
+out="$(run_stop "$SID_HINT" "$TMP/transcript.jsonl" SDP_PRECOMPACT_SETTINGS="$HINTDIR/settings-wide.json")"
 [ -z "$out" ] && ok "a [1m] model setting widens the window" || bad "the [1m] model setting was ignored"
 drop "$STATE_HINT"
+
+# The negative half. Without it the case above passes whenever the override is
+# ignored and some other wide signal happens to be present.
+SID_NH="narrowhint-sdp-precompact-selftest-$$"; STATE_NH="$(mkstate "$SID_NH")"; drop "$STATE_NH"
+out="$(run_stop "$SID_NH" "$TMP/transcript.jsonl" SDP_PRECOMPACT_SETTINGS="$HINTDIR/settings-narrow.json")"
+[ -n "$out" ] && ok "a settings file naming no wide model leaves the window narrow" \
+  || bad "the window widened with no wide signal (the settings seam is not being read)"
+drop "$STATE_NH"
 
 # ANTHROPIC_MODEL is one of the ways a wide window gets selected without any
 # settings file naming it, and a session that has never compacted has no
