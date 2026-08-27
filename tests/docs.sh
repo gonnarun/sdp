@@ -353,6 +353,53 @@ for f, exp in EXPECT.items():
 sys.exit(0 if ok else 1)
 PY
 
+# ---- (xiv) turn-conduct rule present in BOTH core trees --------------------
+# Issue #1: an agent can end a turn with a progress report while work remains.
+# On a host where a response carrying no action ends the turn, that report IS a
+# stop -- no question asked, no error raised. The pre-existing rules nearest to
+# this ("<=7 questions", "do not ask the user -- review it with the gate") govern
+# ASKING and are scoped to one stage each, so neither catches a statement. The
+# rule is cross-stage conduct and must be identical in both trees; a host-specific
+# variant would also register as a NON-direction divergence and trip (xi-c).
+for f in core/SDP.md plugins/sdp/core/SDP.md; do
+  grep -qF 'No progress-only stops' "$f" \
+    && ok "(xiv) $f carries the no-progress-only-stops rule" \
+    || bad "(xiv) $f LOST the no-progress-only-stops rule (issue #1 regression)"
+  grep -qF 'Before ending a turn, classify' "$f" \
+    && ok "(xiv) $f carries the four-way end-of-turn test" \
+    || bad "(xiv) $f LOST the four-way end-of-turn test"
+done
+# Label pinning alone is not enough. Both lead phrases and all four class names
+# can survive while the RULE is loosened -- add "or the next action is lengthy"
+# to the exception list in BOTH trees and (xiv)'s name checks still pass, and
+# (xi-c) sees no divergence because the trees still agree. That reopens the very
+# issue this rule closes. So the two bullets are pinned verbatim: any edit trips
+# this guard and has to be made deliberately, here, in the same commit.
+python3 - <<'PY' && ok "(xiv) both core trees carry the turn-conduct rule verbatim" \
+                 || bad "(xiv) the turn-conduct rule text drifted (see stderr)"
+import pathlib, sys
+
+EXPECTED = [
+    '* **No progress-only stops**: do not end a turn with a status report while a permitted next action remains — run that action and report with its result. Ending is correct only when the workflow is complete, a rule requires a pause, an irreversible or outward-facing step needs approval (merge, push, migration), or progress is genuinely blocked.',
+    "* **Before ending a turn, classify**: **don't ask** — policy, the plan, or a frozen Stage 1 decision already fixes the next action; take it (`the default is to continue` is the tell). **Say, don't stop** — a user answer would be better but a conservative default exists; take it, state it in one line, continue. **Stop and ask** — no safe default exists; ask only for that decision. **Stop and report** — a hard halt or an unattended pause forbids further action and poses no answerable question; report the state and stop.",
+]
+
+problems = []
+for tree in ("core/SDP.md", "plugins/sdp/core/SDP.md"):
+    lines = pathlib.Path(tree).read_text(encoding="utf-8").splitlines()
+    got = [l for l in lines
+           if l.startswith("* **No progress-only stops**")
+           or l.startswith("* **Before ending a turn, classify**")]
+    if got != EXPECTED:
+        problems.append(tree)
+        for want, have in zip(EXPECTED, got + ["<missing>"] * (len(EXPECTED) - len(got))):
+            if want != have:
+                sys.stderr.write("  %s: expected\n    %s\n  got\n    %s\n" % (tree, want, have))
+        if len(got) > len(EXPECTED):
+            sys.stderr.write("  %s: %d extra bullet(s)\n" % (tree, len(got) - len(EXPECTED)))
+sys.exit(1 if problems else 0)
+PY
+
 # ---- (xii) Codex dispatch worker / Claude review boundary ------------------
 for f in plugins/sdp/scripts/run_segment_tmux.sh scripts/run_segment_tmux.sh; do
   { grep -qF 'command -v codex' "$f" \
