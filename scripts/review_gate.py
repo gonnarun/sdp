@@ -248,11 +248,22 @@ def _trusted_binary(name: str, root: Path) -> tuple[Path | None, str]:
         if not found:
             return None, f"{name} not resolved"
     else:
-        found = shutil.which(name, path=_safe_path())
+        # NOT shutil.which: it consults ambient PATHEXT to pick the extension,
+        # which decides which file becomes the reviewer (win_compat.which_fixed).
+        found = win_compat.which_fixed(name, path=_safe_path())
         if not found:
             return None, f"{name} not found in safe path"
 
-    path = Path(found).resolve()
+    raw_found = Path(found)
+    path = raw_found.resolve()
+    if not win_compat.posix_perms_meaningful():
+        # BEFORE-and-after: resolve() follows the junction this check exists to
+        # detect, so checking only `path` inspects a path the substitution has
+        # already been erased from.
+        try:
+            win_compat.assert_trusted_chain(_passwd_home(), raw_found, path)
+        except OSError as exc:
+            return None, f"{name} binary path is not trusted: {exc}"
     if not path.exists():
         return None, f"{name} path does not exist"
     if _is_relative_to(path, root):
@@ -271,10 +282,7 @@ def _trusted_binary(name: str, root: Path) -> tuple[Path | None, str]:
         # Windows: st_mode is synthesised and st_uid is always 0, so neither test
         # means anything. Reparse-point rejection over the whole chain replaces
         # them (ADR-W05 W05-b(1)); it is the control, not an addition.
-        try:
-            win_compat.reject_reparse_chain(_passwd_home(), path)
-        except OSError as exc:
-            return None, f"{name} binary path is not trusted: {exc}"
+        pass   # chain already validated pre-resolve, above
 
     # Parent-directory writability is intentionally NOT rejected here. The swap it
     # would enable (a TOCTOU replace between validation and exec) is closed at exec
@@ -363,6 +371,13 @@ def _base_env() -> dict[str, str]:
     env["PATH"] = _safe_path()
     env.setdefault("TERM", "dumb")
     env["CLAUDE_CODE_SAFE_MODE"] = "1"
+    if not win_compat.posix_perms_meaningful():
+        # Windows children need SystemRoot/ComSpec to load at all -- CPython's own
+        # subprocess raises FileNotFoundError when neither is set. Every value is
+        # DERIVED (Win32 GetSystemWindowsDirectoryW, or the passwd home); nothing is
+        # inherited, because an ambient ComSpec would redirect the command processor
+        # exactly as an ambient HOME would redirect the token path.
+        env.update(win_compat.windows_env(_passwd_home(), _passwd_name()))
     return env
 
 
@@ -528,6 +543,7 @@ def _run_argv(
     timeout_s: int,
     max_output: int,
     extract=None,
+    stdin_text: str | None = None,
 ) -> ProviderResult:
     # Exec target selection. When the binary sits in a group/world-writable dir
     # (Homebrew's /opt/homebrew/bin, where agy commonly lives), exec a hardlink of
@@ -550,16 +566,31 @@ def _run_argv(
         if exec_path is None:
             return ProviderResult("infra", argv[0], "", "", link_err)
         executable = exec_path
+    # BUG-009: `executable` becomes lpApplicationName in CreateProcess, and
+    # CreateProcessW requires that to be cmd.exe for a batch file -- passing the
+    # .cmd itself makes Windows try to load a script as a PE image. Omitting it
+    # lets CreateProcess apply its own documented batch handling; argv[0] is still
+    # the resolved, chain-checked path. The POSIX hardlink branch that `executable`
+    # exists for is never taken on Windows, so nothing is lost.
+    if win_compat.is_batch_launcher(executable):
+        executable = None
     try:
         proc = subprocess.Popen(
             argv,
             executable=executable,
             cwd=str(cwd),
             env=_base_env(),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Explicit, both directions. Without it the child's output is decoded
+            # with the locale encoding -- cp949 on a Korean Windows install -- and a
+            # reviewer emitting UTF-8 raises UnicodeDecodeError, which the gate then
+            # reports as "invalid or empty output". The prompt now travels the same
+            # pipe, so the encoding matters on the way in as well.
+            encoding="utf-8",
+            errors="replace",
             start_new_session=True,
         )
     except OSError as exc:
@@ -572,7 +603,7 @@ def _run_argv(
 
     timed_out = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_s)
+        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
         win_compat.kill_process_tree(proc, signal)
@@ -687,8 +718,13 @@ def _claude_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> P
     ]
     if model:
         argv.extend(["--model", model])
-    argv.extend(["-p", prompt])
-    result = _run_argv(argv, cwd=root, timeout_s=timeout_s, max_output=max_output)
+    # Prompt over stdin, not argv: `-p/--print` is documented as "useful for pipes"
+    # and --input-format defaults to text on both claude and agy. This keeps the
+    # artifact -- the largest untrusted input the gate handles -- off every command
+    # line, and off the 8191-character cmd.exe limit a Windows .cmd shim imposes.
+    argv.append("-p")
+    result = _run_argv(argv, cwd=root, timeout_s=timeout_s,
+                       max_output=max_output, stdin_text=prompt)
     result.provider = "claude"
     return result
 
@@ -822,9 +858,17 @@ def _codex_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Pr
     ]
     if model:
         argv.extend(["-m", model])
-    argv.append(prompt)
+    # The prompt embeds the artifact verbatim and is the largest untrusted thing the
+    # gate handles. codex documents a stdin form -- `codex exec --help`: "If not
+    # provided as an argument (or if `-` is used), instructions are read from stdin"
+    # -- so it never goes on argv. That removes the 8191-character cmd.exe command
+    # line limit on Windows and keeps untrusted text off any command line at all.
+    # claude and agy do the same through their own documented pipe form; see
+    # _claude_result. No reviewer receives the prompt as an argv element.
+    argv.append("-")
     result = _run_argv(
-        argv, cwd=root, timeout_s=timeout_s, max_output=max_output, extract=_codex_extract
+        argv, cwd=root, timeout_s=timeout_s, max_output=max_output,
+        extract=_codex_extract, stdin_text=prompt,
     )
     result.provider = "codex"
     return result
@@ -843,8 +887,13 @@ def _agy_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Prov
     # no-op that fell back to the default model).
     if model:
         argv.extend(["--model", model])
-    argv.extend(["-p", prompt])
-    result = _run_argv(argv, cwd=root, timeout_s=timeout_s, max_output=max_output)
+    # Prompt over stdin, not argv: `-p/--print` is documented as "useful for pipes"
+    # and --input-format defaults to text on both claude and agy. This keeps the
+    # artifact -- the largest untrusted input the gate handles -- off every command
+    # line, and off the 8191-character cmd.exe limit a Windows .cmd shim imposes.
+    argv.append("-p")
+    result = _run_argv(argv, cwd=root, timeout_s=timeout_s,
+                       max_output=max_output, stdin_text=prompt)
     result.provider = "agy"
     return result
 
@@ -858,7 +907,7 @@ def _append_ndjson(base_dir: Path, row: dict[str, Any]) -> bool:
     try:
         base_dir.mkdir(parents=True, exist_ok=True)
         path = base_dir / "gate-audit.ndjson"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, win_compat.open_flags(os.O_WRONLY, os.O_CREAT, os.O_APPEND), 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         return True
@@ -928,7 +977,7 @@ def _record_shim_hit() -> None:
             "round": None,
         }
         path = base_dir / "gate-audit.ndjson"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, win_compat.open_flags(os.O_WRONLY, os.O_CREAT, os.O_APPEND), 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         try:
@@ -1063,14 +1112,28 @@ def _gate_mode(cfg: dict[str, str]) -> str:
 
 # ------------------------------------------------------------------ state layer
 def _audit_base(root: Path) -> Path:
+    # Whatever branch produces it, this directory holds the gate log, the state lock,
+    # the .halt / .infra_flag markers and the audit ndjson -- files the gate writes,
+    # rewrites and clears. A symlink or junction anywhere on the path redirects all
+    # of that, so every branch validates its own chain, not just the absolute one.
+    # Not Windows-only: the default branch below had no check at all on any platform.
     raw = os.environ.get("SDP_BASE_DIR")
     if not raw:
-        return root / ".private" / "sdp-artifacts"
+        default = root / ".private" / "sdp-artifacts"
+        try:
+            win_compat.reject_reparse_chain(root, default)
+        except OSError as exc:
+            raise InfraError(f"audit base is not trusted: {exc}") from exc
+        return default
     cand = _expand(raw)
     if cand.is_absolute():
         # Absolute out-of-project base_dir is SUPPORTED (sdp-anchor.sh), accepted
         # iff uid-owned / non-symlink / not group-world-writable.
         resolved = cand.resolve(strict=False)
+        try:
+            win_compat.assert_trusted_chain(_passwd_home(), cand, resolved)
+        except OSError as exc:
+            raise InfraError(f"SDP_BASE_DIR is not trusted: {exc}") from exc
         try:
             if resolved.exists():
                 if resolved.is_symlink():
@@ -1082,15 +1145,15 @@ def _audit_base(root: Path) -> Path:
                         raise InfraError(f"SDP_BASE_DIR not uid-owned: {raw}")
                     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
                         raise InfraError(f"SDP_BASE_DIR group/world writable: {raw}")
-                else:
-                    try:
-                        win_compat.reject_reparse_chain(_passwd_home(), resolved)
-                    except OSError as exc:
-                        raise InfraError(f"SDP_BASE_DIR is not trusted: {exc}") from exc
         except OSError as exc:
             raise InfraError(f"SDP_BASE_DIR unusable: {exc}") from exc
         return resolved
-    # Relative -> anchored against root (never os.getcwd()). This is the defect.
+    # Relative -> anchored against root (never os.getcwd()). _resolve_inside resolves,
+    # which erases a link on the way, so the RAW candidate chain is checked first.
+    try:
+        win_compat.reject_reparse_chain(root, root / raw)
+    except OSError as exc:
+        raise InfraError(f"SDP_BASE_DIR is not trusted: {exc}") from exc
     return _resolve_inside(root, raw, must_exist=False)
 
 
@@ -1101,7 +1164,15 @@ def _artifact_key(artifact: Path) -> str:
 
 
 def _state_paths(root: Path, key: str) -> dict[str, Path]:
-    base = _audit_base(root) / "gate"   # date-free (deviation D-A)
+    audit_base = _audit_base(root)
+    base = audit_base / "gate"   # date-free (deviation D-A)
+    # _audit_base validates its own path, but the gate/ leaf under it is not covered
+    # -- and every log, lock, .halt and .infra_flag lives there. Validate the exact
+    # directory about to be written to, not just its parent.
+    try:
+        win_compat.reject_reparse_chain(audit_base, base)
+    except OSError as exc:
+        raise InfraError(f"gate state directory is not trusted: {exc}") from exc
     stem = str(base / f"review_gate_{key}")
     return {
         "log": Path(f"{stem}.log"),
@@ -1470,7 +1541,7 @@ def _stall_slug(why: str) -> str:
 def _append_line(path: Path, line: str) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(path, win_compat.open_flags(os.O_WRONLY, os.O_CREAT, os.O_APPEND), 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
         return True
@@ -1704,7 +1775,7 @@ def _write_request(dest: Path, text: str) -> None:
     #     directory -- a different directory makes os.replace cross-device and
     #     therefore non-atomic.
     tmp = dest.parent / f".{dest.name}.{os.getpid()}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = win_compat.open_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL, getattr(os, "O_NOFOLLOW", 0))
     try:
         fd = os.open(tmp, flags, 0o600)
     except OSError as exc:
@@ -1754,10 +1825,12 @@ def _state_lock(lock_path: Path, deadline: float):
     import time
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, win_compat.open_flags(os.O_CREAT, os.O_RDWR), 0o600)
+    acquired = False
     try:
         while True:
             try:
                 win_compat.lock_exclusive(fd)
+                acquired = True
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -1766,7 +1839,12 @@ def _state_lock(lock_path: Path, deadline: float):
         yield
     finally:
         try:
-            win_compat.unlock(fd)
+            # Only unlock what was actually taken. On Windows msvcrt LK_UNLCK on an
+            # unlocked region raises OSError, and raising from this `finally` would
+            # REPLACE the InfraError timeout with an opaque one. POSIX flock(LOCK_UN)
+            # on an unlocked fd is a harmless no-op, which is why this hid there.
+            if acquired:
+                win_compat.unlock(fd)
         finally:
             os.close(fd)
 
@@ -2675,6 +2753,8 @@ def _doctor(cwd: str | None = None) -> tuple[str, bool, bool]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )

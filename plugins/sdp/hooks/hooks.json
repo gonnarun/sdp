@@ -1,4 +1,5 @@
 {
+  "_comment": "Claude Code only. Codex reads hooks/hooks.codex.json, declared in .codex-plugin/plugin.json. shell form with shell=bash, not exec form: exec form would spawn `bash` from PATH, which a Windows host need not have, whereas shell=bash lets Claude Code select Git Bash itself. Embedded quotes are safe here because bash parses them; only the Codex Windows runtime mis-parses them.",
   "hooks": {
     "Stop": [
       {
@@ -6,9 +7,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_hook.py\" stop",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh\" stop",
             "timeout": 15,
-            "statusMessage": "Checking SDP precompact threshold..."
+            "statusMessage": "Checking SDP precompact threshold...",
+            "shell": "bash"
           }
         ]
       }
@@ -19,8 +21,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_hook.py\" precompact",
-            "timeout": 10
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh\" precompact",
+            "timeout": 10,
+            "shell": "bash"
           }
         ]
       }
@@ -31,8 +34,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_hook.py\" resume",
-            "timeout": 10
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh\" resume",
+            "timeout": 10,
+            "shell": "bash"
           }
         ]
       }

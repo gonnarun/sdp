@@ -208,6 +208,151 @@ def reject_reparse_chain(base: str | os.PathLike, target: str | os.PathLike) -> 
             raise WinCompatError(f"path component is a reparse point: {current}")
 
 
+def assert_trusted_chain(base, raw, resolved) -> None:
+    """Reject a reparse point anywhere on the path, BEFORE and AFTER resolution.
+
+    Ordering is the whole point. ``Path.resolve()`` follows symlinks and junctions,
+    so a chain check that runs only on the resolved path inspects a path from which
+    the substitution has already been erased -- it can never see what it exists to
+    detect. Callers must therefore pass the raw, pre-resolve path as well.
+    """
+    reject_reparse_chain(base, raw)
+    if str(resolved) != str(raw):
+        reject_reparse_chain(base, resolved)
+
+
+def system_windows_dir() -> str:
+    """The Windows directory from Win32, never from %SystemRoot%.
+
+    Same rule as passwd_home: a value that decides where code is loaded from must
+    not be settable by the environment we were launched with.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    kernel32.GetSystemWindowsDirectoryW.restype = wintypes.UINT
+    size = kernel32.GetSystemWindowsDirectoryW(None, 0)
+    if not size:
+        raise WinCompatError(f"GetSystemWindowsDirectoryW sizing failed (err={ctypes.get_last_error()})")
+    buf = ctypes.create_unicode_buffer(size)
+    if not kernel32.GetSystemWindowsDirectoryW(buf, size):
+        raise WinCompatError(f"GetSystemWindowsDirectoryW failed (err={ctypes.get_last_error()})")
+    return buf.value
+
+
+def windows_env(home: str, user: str) -> dict:
+    """Windows runtime variables for a child process -- every one DERIVED.
+
+    Nothing is inherited from os.environ. An absolute-path shape check cannot
+    establish that a value is OS-owned, and ``ComSpec`` in particular decides which
+    command processor runs, so inheriting it would reintroduce exactly the
+    redirection the passwd-home rule exists to prevent.
+
+    CPython's own subprocess raises ``FileNotFoundError('shell not found: neither
+    %ComSpec% nor %SystemRoot% is set')``, and the Popen documentation requires a
+    valid ``SystemRoot`` in ``env`` to run a side-by-side assembly -- which is why
+    an environment without these cannot launch a Windows child at all.
+    """
+    # ntpath, not os.path: this function composes WINDOWS paths, and on a POSIX host
+    # os.path.splitdrive does not understand a drive letter and os.path.join would
+    # use forward slashes. Binding the flavour explicitly makes the function correct
+    # wherever it is exercised, which is what lets a simulated test mean anything.
+    import ntpath
+
+    env = {}
+    try:
+        windir = system_windows_dir()
+    except OSError:
+        windir = None
+    if windir:
+        env["SystemRoot"] = windir
+        env["windir"] = windir
+        drive = ntpath.splitdrive(windir)[0]
+        if drive:
+            env["SystemDrive"] = drive
+        comspec = ntpath.join(windir, "System32", "cmd.exe")
+        if os.path.isfile(comspec):
+            env["ComSpec"] = comspec
+    # Fixed, not inherited: an inherited PATHEXT steers which extension a bare
+    # command name resolves to.
+    env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+    env["USERPROFILE"] = home
+    env["USERNAME"] = user
+    env["APPDATA"] = ntpath.join(home, "AppData", "Roaming")
+    env["LOCALAPPDATA"] = ntpath.join(home, "AppData", "Local")
+    temp = ntpath.join(home, "AppData", "Local", "Temp")
+    env["TEMP"] = temp
+    env["TMP"] = temp
+    # NUMBER_OF_PROCESSORS / PROCESSOR_ARCHITECTURE are omitted: not needed, so not
+    # surface. No loader variables (NODE_OPTIONS and the like) are ever added.
+    return env
+
+
+FIXED_PATHEXT = (".COM", ".EXE", ".BAT", ".CMD")
+
+BATCH_SUFFIXES = (".cmd", ".bat")
+
+
+def which_fixed(name: str, path: str):
+    """Resolve `name` over `path` using a FIXED extension list on Windows.
+
+    ``shutil.which`` reads ``os.getenv("PATHEXT")`` to decide which extensions to
+    try. That is ambient, and it decides which FILE becomes the reviewer: an empty
+    or hostile PATHEXT can make a legitimate ``codex.cmd`` unresolvable, or steer
+    resolution to an attacker-chosen extension. Fixing the list here closes that,
+    and it has to be closed HERE rather than in the child environment -- the child's
+    PATHEXT is set after resolution has already happened.
+
+    POSIX keeps shutil.which unchanged.
+    """
+    import shutil
+
+    if not IS_WINDOWS:
+        return shutil.which(name, path=path)
+    root, ext = os.path.splitext(name)
+    candidates = [name] if ext else [name + e for e in FIXED_PATHEXT]
+    for directory in path.split(os.pathsep):
+        if not directory:
+            continue
+        for cand in candidates:
+            full = os.path.join(directory, cand)
+            if os.path.isfile(full) and os.access(full, os.X_OK):
+                return full
+    return None
+
+
+def is_batch_launcher(path) -> bool:
+    """True for a Windows batch file. Not a refusal -- a dispatch decision.
+
+    CreateProcessW requires lpApplicationName to be cmd.exe when running a batch
+    file; passing the batch path there makes it load a script as a PE image.
+    """
+    return IS_WINDOWS and str(path).lower().endswith(BATCH_SUFFIXES)
+
+
+def walk_checked(base, parts):
+    """Validate each component of base/parts and return the joined path.
+
+    WEAKER THAN THE POSIX openat WALK, deliberately and unavoidably. The POSIX
+    reader opens each directory and descends by descriptor, so the directory it
+    validated is the directory it reads. This validates by name and then opens by
+    path: a component swapped between the two steps is NOT detected. Windows has
+    no stdlib equivalent of openat, and closing this would need NtCreateFile-class
+    handle-relative traversal. Recorded in KNOWN_GAPS NC-30, and pinned by a test
+    that asserts the swap goes undetected rather than pretending it does not.
+    """
+    current = Path(base)
+    if _is_reparse_point(current):
+        raise WinCompatError(f"config base is a reparse point: {current}")
+    for part in parts:
+        current = current / part
+        if _is_reparse_point(current):
+            raise WinCompatError(f"unsafe config path component: {current}")
+    return current
+
+
 # ------------------------------------------------------------------ file locks
 
 LOCK_BYTES = 1                                        # the byte range both backends lock
@@ -266,17 +411,19 @@ def safe_path_dirs(home: str) -> list[str]:
     import glob
 
     if IS_WINDOWS:
+        import ntpath   # compose Windows paths with the Windows flavour (see windows_env)
+
         dirs = [
-            os.path.join(home, "AppData", "Roaming", "npm"),
-            os.path.join(home, "AppData", "Local", "Volta", "bin"),
-            os.path.join(home, ".volta", "bin"),
-            os.path.join(home, ".local", "bin"),
+            ntpath.join(home, "AppData", "Roaming", "npm"),
+            ntpath.join(home, "AppData", "Local", "Volta", "bin"),
+            ntpath.join(home, ".volta", "bin"),
+            ntpath.join(home, ".local", "bin"),
             r"C:\Program Files\nodejs",
             r"C:\Program Files (x86)\nodejs",
         ]
         for pattern in (
-            os.path.join(home, "AppData", "Roaming", "nvm", "v*"),
-            os.path.join(home, ".nvm", "versions", "node", "*"),
+            ntpath.join(home, "AppData", "Roaming", "nvm", "v*"),
+            ntpath.join(home, ".nvm", "versions", "node", "*"),
         ):
             dirs.extend(sorted(glob.glob(pattern), reverse=True))
         return [d for d in dirs if os.path.isdir(d)]
@@ -305,15 +452,46 @@ def safe_path_dirs(home: str) -> list[str]:
 
 # --------------------------------------------------------------- process teardown
 
-def kill_process_tree(proc, signal_module) -> None:
-    """Terminate a timed-out child as forcefully as the platform allows.
+def _taskkill_argv(pid: int) -> list[str] | None:
+    """Fixed argv for a Windows tree kill, with the binary path DERIVED.
 
-    On Windows neither ``os.killpg`` nor ``signal.SIGKILL`` exists, so the engine's
-    ``os.killpg(proc.pid, signal.SIGKILL)`` raised AttributeError -- which escapes
-    ``except OSError`` and skips the designed ``proc.kill()`` fallback entirely.
+    Nothing here comes from the caller except a PID, which is coerced to an int, so
+    there is no argv the reviewer's output could influence. ``taskkill`` is located
+    under the system directory rather than found on PATH, for the same reason
+    ``ComSpec`` is derived rather than inherited.
+    """
+    import ntpath
+
+    try:
+        exe = ntpath.join(system_windows_dir(), "System32", "taskkill.exe")
+    except OSError:
+        return None
+    if not os.path.isfile(exe):
+        return None
+    return [exe, "/PID", str(int(pid)), "/T", "/F"]
+
+
+def kill_process_tree(proc, signal_module) -> None:
+    """Terminate a timed-out child, and its descendants where the platform allows.
+
+    POSIX: the process GROUP, via ``os.killpg`` -- ``start_new_session=True`` at the
+    spawn site is what makes the group exist.
+
+    Windows: there is no process group to signal, and ``os.killpg`` and
+    ``signal.SIGKILL`` do not exist at all -- the engine's original
+    ``os.killpg(proc.pid, signal.SIGKILL)`` raised AttributeError, which escapes
+    ``except OSError`` and skipped the designed ``proc.kill()`` fallback entirely.
+    ``proc.kill()`` alone terminates only the direct child, which for a `.cmd`
+    reviewer is the `cmd.exe` wrapper -- the Node process holding the pipe survives.
+    So a tree kill is attempted through ``taskkill /T /F`` first, falling back to
+    ``proc.kill()``.
+
+    NOT VERIFIED ON WINDOWS. The taskkill path has never been executed on a Windows
+    host; ADR-W10 case A15 is what would establish it. Until then no tree-kill
+    guarantee is claimed -- see KNOWN_GAPS NC-30.
     """
     if not hasattr(os, "killpg"):
-        proc.kill()
+        _windows_tree_kill(proc)
         return
     try:
         os.killpg(proc.pid, signal_module.SIGTERM)
@@ -324,12 +502,37 @@ def kill_process_tree(proc, signal_module) -> None:
 def kill_process_tree_hard(proc, signal_module) -> None:
     """The SIGKILL rung of the same ladder."""
     if not hasattr(os, "killpg") or not hasattr(signal_module, "SIGKILL"):
-        proc.kill()
+        _windows_tree_kill(proc)
         return
     try:
         os.killpg(proc.pid, signal_module.SIGKILL)
     except OSError:
         proc.kill()
+
+
+def _windows_tree_kill(proc) -> None:
+    """Best-effort descendant teardown, then the direct child regardless."""
+    argv = _taskkill_argv(proc.pid)
+    if argv:
+        import subprocess
+
+        # Same environment policy as every other child: derived, never ambient.
+        # taskkill is an absolute derived path, but it still loads Windows runtime
+        # DLLs, and an inherited loader environment here would be the one hole in an
+        # otherwise consistent rule.
+        try:
+            env = windows_env(passwd_home(), passwd_name())
+        except OSError:
+            env = None
+        try:
+            subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10, env=env)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 # ------------------------------------------------------------------- diagnostics

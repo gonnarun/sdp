@@ -74,7 +74,11 @@ python3 - "$MANIFEST_CANONICAL" <<'PY' && ok "every hook command is anchored to 
 import json, sys
 hooks = json.load(open(sys.argv[1]))["hooks"]
 cmds = [h["command"] for entries in hooks.values() for e in entries for h in e["hooks"]]
-raise SystemExit(0 if cmds and all("${CLAUDE_PLUGIN_ROOT}/scripts/precompact_hook.py" in c for c in cmds) else 1)
+# The hook is reached through scripts/precompact_launcher.sh now (Windows CPython
+# does not guarantee a `python3` name), so the assertion is on the ANCHOR and the
+# plugin-owned scripts dir, which is what this guard was always about -- not on one
+# particular filename.
+raise SystemExit(0 if cmds and all("${CLAUDE_PLUGIN_ROOT}/scripts/" in c for c in cmds) else 1)
 PY
 
 # The standard hooks/hooks.json is auto-loaded by the host. Naming it in the

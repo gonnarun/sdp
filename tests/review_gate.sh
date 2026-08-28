@@ -28,8 +28,15 @@ cat > "$BIN/claude" <<STUB
 # as []). The --version probe is excluded above so the real review argv is captured.
 : > "$CTRL/claude_argv"
 for a in "\$@"; do printf '[%s]\n' "\$a" >> "$CTRL/claude_argv"; done
-last=""; for a in "\$@"; do last="\$a"; done
-printf '%s' "\$last" > "$CTRL/claude_prompt"
+# The prompt now arrives on STDIN, not as the last argv element: -p/--print is a
+# flag and the reviewer reads the prompt from a pipe. Capture stdin when there is
+# something to read, and fall back to the last argv token so this stub still works
+# if the transport is ever reverted.
+if [ ! -t 0 ]; then cat > "$CTRL/claude_prompt"; fi
+if [ ! -s "$CTRL/claude_prompt" ]; then
+  last=""; for a in "\$@"; do last="\$a"; done
+  printf '%s' "\$last" > "$CTRL/claude_prompt"
+fi
 case "\$(cat "$CTRL/claude_mode" 2>/dev/null || echo allow)" in
   allow)     printf 'ALLOW: claude ok\n'; exit 0 ;;
   block)     printf 'BLOCK: claude no\n'; exit 0 ;;

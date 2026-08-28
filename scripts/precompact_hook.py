@@ -151,23 +151,58 @@ def _selftest_override(name: str) -> str:
         home = passwd_home()
         resolved = Path(raw).resolve(strict=False)
         resolved.relative_to(home)
+        # resolve() above follows a junction, so containment is checked on a path the
+        # substitution has already been erased from. Validate the RAW path too, so an
+        # override that merely POINTS inside the home through a link is refused
+        # rather than accepted on the strength of where it lands.
+        win_compat.reject_reparse_chain(home, Path(raw))
     except (OSError, ValueError, KeyError):
         return ""
     return str(resolved)
 
 
+def _assert_trusted(path: Path, what: str) -> Path:
+    """Refuse a state path reached through a symlink or junction. EVERY platform.
+
+    An earlier revision of this guard ran on Windows only, with a comment claiming
+    POSIX was already covered by ``O_NOFOLLOW`` and uid checks. **That claim was
+    false.** This module has no uid check anywhere, and ``O_NOFOLLOW`` protects only
+    the final component of a write -- neither stops ``~/.sdp`` or the state
+    directory itself from being a symlink that every read, write and unlink then
+    follows. ``_prune_windows`` unlinks under ``state_dir()``, so this is a delete
+    primitive on POSIX exactly as much as on Windows.
+
+    ``reject_reparse_chain`` detects POSIX symlinks as well as Windows junctions, so
+    the guard is unconditional.
+
+    BEHAVIOUR CHANGE, deliberate: a deliberately symlinked ``~/.sdp`` -- a plausible
+    dotfile-management arrangement -- is now refused on every platform. Failing
+    closed was chosen over honouring it because the alternative is an unbounded
+    delete primitive. Recorded in KNOWN_GAPS NC-30.
+    """
+    win_compat.reject_reparse_chain(win_compat.passwd_home(), path)
+    return path
+
+
 def sdp_home() -> Path:
     override = _selftest_override("SDP_PRECOMPACT_HOME")
-    return Path(override) if override else passwd_home() / SDP_HOME_DIRNAME
+    if override:
+        return _assert_trusted(Path(override), "sdp home override")
+    return _assert_trusted(passwd_home() / SDP_HOME_DIRNAME, "sdp home")
 
 
 def config_path() -> Path:
-    return sdp_home() / CONFIG_BASENAME
+    # Every returned state path is validated to its OWN last component. Validating
+    # only the parent leaves the leaf -- ~/.sdp/precompact, ~/.sdp/precompact.json --
+    # free to be a junction, which is the component an attacker would actually plant.
+    return _assert_trusted(sdp_home() / CONFIG_BASENAME, "config path")
 
 
 def state_dir() -> Path:
     override = _selftest_override("SDP_PRECOMPACT_STATE_DIR")
-    return Path(override) if override else sdp_home() / STATE_DIRNAME
+    if override:
+        return _assert_trusted(Path(override), "state dir override")
+    return _assert_trusted(sdp_home() / STATE_DIRNAME, "state dir")
 
 
 def _read_json(path: Path, max_bytes: int = MAX_JSON_BYTES) -> dict:
@@ -212,7 +247,7 @@ def _write_json(path: Path, payload: dict) -> bool:
     tmp = path.with_name(path.name + ".tmp." + str(os.getpid()))
     # getattr form: a bare os.O_NOFOLLOW raises AttributeError where the constant
     # is absent, and AttributeError escapes the `except OSError` below.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = win_compat.open_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL, getattr(os, "O_NOFOLLOW", 0))
     try:
         fd = os.open(tmp, flags, 0o600)
     except OSError:
@@ -565,12 +600,24 @@ def list_snapshots(cwd: str | None) -> list:
     base = Path(cwd) / SNAPSHOT_SUBDIR
     if not base.is_dir():
         return found
+    # The leaf lstat below is not enough: a symlink or junction at .private/precompact
+    # or at a day directory is followed by iterdir(), so snapshots from outside the
+    # workspace would be injected into the resume text. Not Windows-only -- a POSIX
+    # symlinked day directory does the same.
+    try:
+        win_compat.reject_reparse_chain(Path(cwd), base)
+    except OSError:
+        return found
     try:
         day_dirs = sorted(base.iterdir())
     except OSError:
         return found
     for day_dir in day_dirs:
         if not day_dir.is_dir():
+            continue
+        try:
+            win_compat.reject_reparse_chain(base, day_dir)
+        except OSError:
             continue
         try:
             entries = sorted(day_dir.iterdir())
@@ -692,7 +739,9 @@ def _prune_windows() -> None:
     """Drop window records for sessions that ended long ago."""
     cutoff = time.time() - WINDOW_PRUNE_SEC
     try:
-        entries = list(state_dir().iterdir())
+        # unlink() below is destructive; re-check the exact directory enumerated.
+        sdir = _assert_trusted(state_dir(), "state dir")
+        entries = list(sdir.iterdir())
     except OSError:
         return
     for entry in entries:
@@ -720,6 +769,7 @@ def write_marker(session_id: str, payload: dict) -> bool:
 
 def clear_marker(session_id: str) -> None:
     try:
+        _assert_trusted(marker_path(session_id), "marker")
         os.unlink(marker_path(session_id))
     except OSError:
         pass

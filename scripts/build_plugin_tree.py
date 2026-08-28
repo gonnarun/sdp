@@ -48,6 +48,7 @@ launder a hand-edit -- verify only.
 from __future__ import annotations
 
 import argparse
+import base64
 import filecmp
 import json
 import shutil
@@ -64,6 +65,9 @@ SUBTREES = ("scripts", "skills", "commands", "hooks")
 # Host-divergent MCP manifests: the codex copy is DERIVED from the Claude copy.
 CLAUDE_MCP = CANONICAL / ".mcp.json"          # ${CLAUDE_PLUGIN_ROOT}, no cwd
 CODEX_MCP = CANONICAL / ".mcp.codex.json"     # cwd:".", relative args, no ${VAR}
+CODEX_HOOKS = CANONICAL / "hooks" / "hooks.codex.json"
+WIN_HOOK_PS1 = CANONICAL / "hooks" / "precompact_windows.ps1"
+WIN_PS_EXE = r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 # rel-path (from repo root) -> reason. Not generated; hand-maintained per host.
 HOST_DIVERGENT = {
@@ -141,11 +145,55 @@ def _codex_manifest_bytes() -> bytes:
     return (json.dumps(data, indent=2) + "\n").encode("utf-8")
 
 
+def _ps_payload(verb: str) -> str:
+    """precompact_windows.ps1, comment-stripped, with the verb substituted.
+
+    Comment and blank lines are dropped before encoding because base64 over UTF-16LE
+    inflates ~2.67x and the whole reason the payload exists is a command-line length
+    ceiling. The rationale stays in the reviewable .ps1.
+    """
+    text = WIN_HOOK_PS1.read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    return body.replace("__SDP_VERB__", verb)
+
+
+def _codex_hooks_bytes() -> bytes:
+    """Derive the codex hook manifest's Windows commands from the .ps1 source.
+
+    Same contract as the codex MCP manifest above: one source of truth, derived
+    rather than hand-maintained, and --check reports a stale payload. Codex's Windows
+    hook runtime wraps the whole command line for ``cmd.exe /C`` (openai/codex#38168),
+    so the derived command must contain no double quote at all -- which a base64
+    payload and an absolute %SystemRoot% path satisfy.
+    """
+    data = json.loads(CODEX_HOOKS.read_text(encoding="utf-8"))
+    for entries in data.get("hooks", {}).values():
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                verb = hook["command"].rsplit(" ", 1)[-1]
+                payload = base64.b64encode(
+                    _ps_payload(verb).encode("utf-16-le")
+                ).decode("ascii")
+                hook["commandWindows"] = (
+                    f"{WIN_PS_EXE} -NoProfile -NonInteractive -EncodedCommand {payload}"
+                )
+                if '"' in hook["commandWindows"]:
+                    raise SystemExit("derived commandWindows contains a quote")
+    return (json.dumps(data, indent=2) + "\n").encode("utf-8")
+
+
 def build() -> int:
+    # Canonical hook payloads are refreshed BEFORE the mirror is emitted, so the root
+    # copy is generated from the up-to-date canonical file rather than a stale one.
+    CODEX_HOOKS.write_bytes(_codex_hooks_bytes())
     written = _emit_into(ROOT)
     CODEX_MCP.write_bytes(_codex_manifest_bytes())
     print(f"generated {len(written)} file(s) into the root mirror")
     print(f"derived host-divergent codex manifest {CODEX_MCP.name}")
+    print(f"derived Windows hook payloads in {CODEX_HOOKS.name} from {WIN_HOOK_PS1.name}")
     return 0
 
 
@@ -177,6 +225,12 @@ def check() -> int:
             mismatches.append(f"{CODEX_MCP.name}: missing (run build to derive it)")
         elif CODEX_MCP.read_bytes() != _codex_manifest_bytes():
             mismatches.append(f"{CODEX_MCP.name}: stale vs the codex form derived from .mcp.json")
+        if not CODEX_HOOKS.exists():
+            mismatches.append(f"{CODEX_HOOKS.name}: missing (run build to derive it)")
+        elif CODEX_HOOKS.read_bytes() != _codex_hooks_bytes():
+            mismatches.append(
+                f"{CODEX_HOOKS.name}: commandWindows is stale vs {WIN_HOOK_PS1.name}"
+            )
     if mismatches:
         sys.stderr.write("regen check FAILED — root mirror is stale:\n")
         for line in mismatches:
