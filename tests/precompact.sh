@@ -61,10 +61,15 @@ raise SystemExit(0 if sys.argv[2] in hooks else 1)
 PY
 done
 
-python3 - "$MANIFEST_CANONICAL" <<'PY' && ok "SessionStart is scoped to the compact matcher" || bad "SessionStart matcher is not 'compact'"
+python3 - "$MANIFEST_CANONICAL" <<'PY' && ok "SessionStart is one unscoped hook that binds and resumes" || bad "SessionStart is not a single unscoped start hook"
 import json, sys
 entries = json.load(open(sys.argv[1]))["hooks"]["SessionStart"]
-raise SystemExit(0 if all(e.get("matcher") == "compact" for e in entries) else 1)
+if len(entries) != 1 or entries[0].get("matcher") != "":
+    sys.stderr.write("  expected one unscoped entry, got %r\n"
+                     % [e.get("matcher") for e in entries])
+    raise SystemExit(1)
+cmds = [hk.get("command", "") for hk in entries[0].get("hooks", [])]
+raise SystemExit(0 if all(c.rstrip().endswith(" start") for c in cmds) else 1)
 PY
 
 # ${CLAUDE_PLUGIN_ROOT} is the only path form that survives installation into
@@ -812,6 +817,579 @@ raise SystemExit(0 if "precompact_other_session" in json.load(open(sys.argv[1]))
 PY
 drop "$STATE_MN"
 find "$PROJ/.private/precompact/$DAY" -maxdepth 1 -type f -delete 2>/dev/null || true
+
+# --------------------------------------------------------- terminal driver --
+
+# The one step neither a hook nor a skill can perform for itself: a hook cannot
+# expand a slash command, and no host exposes a programmatic compaction
+# trigger. Where a terminal driver is bound, the command queues `/compact` into
+# the session's own composer; where it is not, every branch here is skipped and
+# the chain still completes later on the host's own auto-compaction. That
+# second case is the one most users are in, so it is pinned first.
+out="$(env -u ORCA_PANE_KEY -u ORCA_CLI_COMMAND -u CLAUDE_SESSION_ID -u CODEX_SESSION_ID \
+       -u CODEX_THREAD_ID SDP_PRECOMPACT_SELFTEST=1 SDP_PRECOMPACT_STATE_DIR="$SELFTEST_HOME/nopane" \
+       python3 "$HOOK_CANONICAL" compact 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "compact declines when no pane is bound to this session" \
+  || bad "compact claimed success with no pane binding (got: $out)"
+case "$out" in
+  *"no terminal driver bound"*) ok "the decline says why" ;;
+  *) bad "the decline gives no reason (got: $out)" ;;
+esac
+
+# The driver executable is chosen by the driver's own rule, once, with no
+# fall-through. The Linux branch is the reason this matters: outside a managed
+# terminal a bare `orca` is the GNOME screen reader, and sending it terminal
+# commands starts speech on the user's machine. This ships to other people.
+python3 - <<'PY' && ok "the driver executable follows the documented resolver" || bad "driver resolution is wrong (see stderr)"
+import importlib, os, sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+
+def resolve(env, platform):
+    saved_env = {k: os.environ.get(k) for k in
+                 ("ORCA_CLI_COMMAND", "ORCA_DEV_REPO_ROOT", "ORCA_PANE_KEY")}
+    saved_plat = sys.platform
+    for k in saved_env:
+        os.environ.pop(k, None)
+    os.environ.update({k: v for k, v in env.items()})
+    sys.platform = platform
+    try:
+        return h.orca_bin()
+    finally:
+        sys.platform = saved_plat
+        for k, v in saved_env.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+cases = [
+    ({"ORCA_CLI_COMMAND": "/opt/x/orca"}, "linux",  "/opt/x/orca"),
+    ({"ORCA_DEV_REPO_ROOT": "/repo"},     "darwin", "orca-dev"),
+    ({},                                  "linux",  "orca-ide"),   # no pane key
+    ({"ORCA_PANE_KEY": "t:l"},            "linux",  "orca"),       # managed terminal
+    ({},                                  "darwin", "orca"),
+]
+bad = [(e, p, resolve(e, p), w) for e, p, w in cases if resolve(e, p) != w]
+for e, p, got, want in bad:
+    sys.stderr.write("  env=%r platform=%s -> %r, want %r\n" % (e, p, got, want))
+# the screen-reader path must be unreachable
+if resolve({}, "linux") == "orca":
+    sys.stderr.write("  Linux outside a managed terminal resolved to bare orca\n"); bad.append(1)
+sys.exit(1 if bad else 0)
+PY
+
+# A pane key binds only when exactly one live terminal matches. Guessing types
+# into somebody else's session, so there is no most-recently-active fallback.
+python3 - <<'PY' && ok "a pane key is bound only when exactly one live terminal matches" || bad "pane matching is not exact"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+live = lambda tab, leaf, handle, connected=True: {
+    "tabId": tab, "leafId": leaf, "handle": handle, "connected": connected}
+rows = [live("tab-A", "leaf-A", "term_1"), live("tab-B", "leaf-B", "term_2"),
+        live("tab-C", "leaf-C", "term_dead", False)]
+cases = [
+    (rows, "tab-A:leaf-A", "term_1"), (rows, "tab-X:leaf-X", ""), (rows, "tab-C:leaf-C", ""),
+    (rows + [live("tab-A", "leaf-A", "term_1b")], "tab-A:leaf-A", ""),
+    (rows, "", ""), (rows, "no-colon", ""), (rows, ":leaf", ""), (rows, "tab:", ""),
+    ([], "tab-A:leaf-A", ""), (None, "tab-A:leaf-A", ""),
+    ([live("tab-A", "l:with:colon", "term_x")], "tab-A:l:with:colon", "term_x"),
+]
+bad = [(k, h.match_handle(r, k), w) for r, k, w in cases if h.match_handle(r, k) != w]
+for k, got, want in bad:
+    sys.stderr.write("  %r -> %r, want %r\n" % (k, got, want))
+sys.exit(1 if bad else 0)
+PY
+
+# Idle is asked of the driver, never inferred from the screen. The host draws a
+# composer for the whole of a running turn, so an empty-looking input box is
+# not evidence the agent stopped -- typing on it steers the turn in progress.
+# Judged on the JSON, because a timeout is ok:false and the exit status is not
+# a dependable stand-in for that across hosts.
+python3 - <<'PY' && ok "idle is decided by the driver's wait condition, on its JSON" || bad "idle detection does not follow the wait contract"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+calls = []
+def fake(args, timeout_sec=None):
+    calls.append(args)
+    fake.timeout_sec = timeout_sec
+    return fake.reply
+h._orca_json = fake
+problems = []
+
+fake.reply = {"ok": True, "result": {"wait": {"handle": "term_1", "condition": "tui-idle", "satisfied": True}}}
+if h.wait_tui_idle("term_1") is not True:
+    problems.append("a satisfied wait was not accepted")
+if calls and ("--for" not in calls[-1] or "tui-idle" not in calls[-1]):
+    problems.append("the wait did not ask for tui-idle: %r" % (calls[-1],))
+# Without --json the CLI prints for humans and the parse yields nothing, so the
+# session reads as permanently busy and nothing is ever typed.
+if calls and "--json" not in calls[-1]:
+    problems.append("the wait did not request JSON: %r" % (calls[-1],))
+# The subprocess must outlive the wait the CLI was asked for, or a two-minute
+# contract is capped at the default and reported as unreadable.
+if (fake.timeout_sec or 0) <= h.INJECT_IDLE_TIMEOUT_MS / 1000.0:
+    problems.append("subprocess timeout %r does not outlast the requested wait"
+                    % (fake.timeout_sec,))
+fake.reply = {"ok": True, "result": {}}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("a reply with no wait block was treated as idle")
+fake.reply = {"ok": True, "result": {"wait": {"handle": "term_1", "condition": "exit", "satisfied": True}}}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("a different wait condition was treated as idle")
+fake.reply = {"ok": True}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("a bare ok:true was treated as idle")
+# A success naming a different terminal must not read as this pane being idle.
+fake.reply = {"ok": True, "result": {"wait": {"handle": "term_other",
+                                              "condition": "tui-idle", "satisfied": True}}}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("a success for another handle was treated as idle")
+
+fake.reply = {"ok": False, "error": {"code": "timeout", "message": "timeout"}}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("a timeout was treated as idle")
+
+fake.reply = {"ok": True, "result": {"wait": {"handle": "term_1", "satisfied": False}}}
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("an unsatisfied wait was treated as idle")
+
+fake.reply = None
+if h.wait_tui_idle("term_1") is not False:
+    problems.append("an unreadable reply was treated as idle")
+if h.wait_tui_idle("") is not False:
+    problems.append("an empty handle was treated as idle")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Nothing may be typed before the session is idle, and the handle must be
+# re-resolved after the wait -- it rotates across a compaction, and the wait
+# can last minutes.
+python3 - <<'PY' && ok "the waiter sends only after idle, and re-resolves the handle first" || bad "the waiter send ordering is wrong"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+order = []
+h.orca_bin = lambda: "orca"
+h.resolve_handle = lambda pane: (order.append("resolve"), "term_1")[1]
+h.send_text = lambda handle, text: (order.append("send:" + text), True)[1]
+h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
+h.clear_self_fire_intent = lambda sid, nonce="": None
+problems = []
+
+h.wait_tui_idle = lambda handle, timeout_ms=0: (order.append("wait"), True)[1]
+order.clear(); h.cmd_inject(["tab:leaf", "/compact", "sid"])
+if order != ["resolve", "wait", "resolve", "send:/compact"]:
+    problems.append("ordering was %r" % (order,))
+
+h.wait_tui_idle = lambda handle, timeout_ms=0: (order.append("wait"), False)[1]
+order.clear(); h.cmd_inject(["tab:leaf", "/compact", "sid"])
+if any(o.startswith("send") for o in order):
+    problems.append("sent despite a busy session: %r" % (order,))
+
+h.wait_tui_idle = lambda handle, timeout_ms=0: True
+h.peek_self_fire_intent = lambda sid, nonce="": ""
+order.clear(); h.cmd_inject(["tab:leaf", "/compact", "sid"])
+if any(o.startswith("send") for o in order):
+    problems.append("sent after the intent was consumed elsewhere: %r" % (order,))
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Every give-up path in the compact waiter must release its own intent, and
+# only its own: an intent that outlives its failed compaction stays live for
+# minutes and fires a resume prompt at whatever the user compacts next.
+python3 - <<'PY' && ok "a failed compaction waiter releases its own intent and no other" || bad "intent release on give-up is wrong"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+cleared = []
+h.clear_self_fire_intent = lambda sid, nonce="": cleared.append((sid, nonce))
+h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
+h.send_text = lambda handle, text: True
+problems = []
+
+def run(label, **stubs):
+    cleared.clear()
+    h.orca_bin = stubs.get("orca_bin", lambda: "orca")
+    h.resolve_handle = stubs.get("resolve_handle", lambda pane: "term_1")
+    h.wait_tui_idle = stubs.get("wait_tui_idle", lambda handle, timeout_ms=0: True)
+    h.send_text = stubs.get("send_text", lambda handle, text: True)
+    h.cmd_inject(["tab:leaf", "/compact", "sid", "n1"])
+    return label, list(cleared)
+
+for label, got in [
+    run("no driver", orca_bin=lambda: ""),
+    run("handle gone", resolve_handle=lambda pane: ""),
+    run("never idle", wait_tui_idle=lambda handle, timeout_ms=0: False),
+    run("send failed", send_text=lambda handle, text: False),
+]:
+    if got != [("sid", "n1")]:
+        problems.append("%s cleared %r, want [('sid','n1')]" % (label, got))
+# a successful send leaves the intent standing for the resume path to consume
+label, got = run("success")
+if got:
+    problems.append("a successful send cleared the intent: %r" % (got,))
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The clear is nonce-scoped, so a late waiter cannot disarm a newer cycle.
+python3 - <<'PY' && ok "a late waiter cannot clear a newer cycle's intent" || bad "intent clearing is not nonce-scoped"
+import os, sys, pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+new_nonce = h.set_self_fire_intent("s", "tab:leaf")
+h.clear_self_fire_intent("s", "stale-nonce")
+if h.peek_self_fire_intent("s", new_nonce) != "tab:leaf":
+    problems.append("a stale nonce deleted the current intent")
+h.clear_self_fire_intent("s", new_nonce)
+if h.peek_self_fire_intent("s", new_nonce) != "":
+    problems.append("the matching nonce did not clear the intent")
+if h.peek_self_fire_intent("s", "other") != "":
+    problems.append("a mismatched nonce was accepted")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# A hand-run snapshot carries no session tag, so the command states which file
+# it wrote. That path is trusted only as far as membership in this project's
+# own enumerated snapshots -- a substring test on the path would accept
+# /tmp/x.private/precompact-evil/a, and the enumeration is what already
+# refuses symlinks and non-regular files.
+python3 - <<'PY' && ok "a stated snapshot is accepted only if it is one of this project's own" || bad "snapshot path validation is not membership-based"
+import os, sys, pathlib, tempfile, time
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+root = pathlib.Path(tempfile.mkdtemp())
+day = root / ".private" / "precompact" / time.strftime("%Y%m%d")
+day.mkdir(parents=True)
+real = day / "precompact_x.md"; real.write_text("x")
+problems = []
+if h._verified_snapshot(str(real), str(root)) != str(real.resolve()):
+    problems.append("a real snapshot was rejected")
+decoy_dir = root / "x.private" / "precompact-evil"; decoy_dir.mkdir(parents=True)
+decoy = decoy_dir / "precompact_a.md"; decoy.write_text("x")
+if h._verified_snapshot(str(decoy), str(root)) != "":
+    problems.append("a look-alike path outside the snapshot tree was accepted")
+outside = root / "passwd"; outside.write_text("x")
+if h._verified_snapshot(str(outside), str(root)) != "":
+    problems.append("an arbitrary file was accepted")
+link = day / "precompact_link.md"
+try:
+    link.symlink_to(outside)
+    if h._verified_snapshot(str(link), str(root)) != "":
+        problems.append("a symlinked snapshot was accepted")
+except OSError:
+    pass
+if h._verified_snapshot("", str(root)) != "" or h._verified_snapshot(str(real), "") != "":
+    problems.append("empty arguments were not refused")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Only a LIVE intent speaks for the compaction that is happening now. A stale
+# sidecar would otherwise bind an old snapshot to a much later manual compact.
+python3 - <<'PY' && ok "an expired intent does not bind its snapshot to a later compaction" || bad "a stale intent still binds"
+import os, sys, pathlib, tempfile, time
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+state = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(state)
+h._write_json(h.intent_path("s"), {"pane_key": "tab:leaf", "nonce": "n",
+                                   "snapshot": "/tmp/old.md",
+                                   "at": time.time() - h.SELF_FIRE_INTENT_TTL_SEC - 60})
+sys.exit(0 if h.peek_self_fire_intent("s") == "" else 1)
+PY
+
+# The waiter has to outlive the hook that started it, and the mechanism is not
+# portable. On POSIX the Windows branch never executes, so it is asserted
+# directly rather than left to a platform that does not run here.
+python3 - <<'PY' && ok "the detached spawn uses the right mechanism on each platform" || bad "detach keywords are wrong for a platform"
+import sys, pathlib, subprocess
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+problems = []
+
+posix = h.detach_kwargs("posix")
+if posix != {"start_new_session": True}:
+    problems.append("posix: %r" % (posix,))
+
+win = h.detach_kwargs("nt")
+if "start_new_session" in win:
+    problems.append("windows passes start_new_session, which it ignores: %r" % (win,))
+flags = win.get("creationflags")
+if not isinstance(flags, int) or flags == 0:
+    problems.append("windows creationflags missing or zero: %r" % (win,))
+else:
+    detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+    newgroup = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    if not flags & detached:
+        problems.append("windows flags lack DETACHED_PROCESS")
+    if not flags & newgroup:
+        problems.append("windows flags lack CREATE_NEW_PROCESS_GROUP")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# And the spawn actually passes them through to Popen.
+python3 - <<'PY' && ok "the spawn hands the platform detach keywords to Popen" || bad "the spawn does not apply the detach keywords"
+import sys, os, pathlib, subprocess
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+seen = {}
+class FakePopen:
+    def __init__(self, argv, **kw):
+        seen["argv"] = argv; seen["kw"] = kw
+h.subprocess.Popen = FakePopen
+os.environ.pop("SDP_PRECOMPACT_SELFTEST", None)
+os.environ.pop("SDP_PRECOMPACT_DRYRUN", None)
+ok = h.spawn_inject("tab:leaf", "/compact", "sid", "n1")
+problems = []
+if not ok:
+    problems.append("spawn reported failure")
+kw = seen.get("kw", {})
+want = h.detach_kwargs()
+if any(kw.get(k) != v for k, v in want.items()):
+    problems.append("detach kwargs not forwarded: %r want superset of %r" % (kw, want))
+if kw.get("stdin") != subprocess.DEVNULL:
+    problems.append("stdio not detached: %r" % (kw,))
+argv = seen.get("argv", [])
+if argv[2:] != ["inject", "tab:leaf", "/compact", "sid", "n1"]:
+    problems.append("argv wrong: %r" % (argv,))
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The tool cannot read the pane key from its own environment on every host, so
+# a hook writes it down and the tool looks it up. Stale or absent bindings must
+# refuse rather than resolve to where the session used to be.
+python3 - <<'PY' && ok "pane bindings are session-scoped, fresh-checked, and fail closed" || bad "pane binding does not fail closed"
+import os, sys, time, pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+if h.bound_pane("nosuch") != "":
+    problems.append("absent binding returned a pane")
+os.environ["ORCA_PANE_KEY"] = "tab:leaf"
+h.bind_pane("s1")
+if h.bound_pane("s1") != "tab:leaf":
+    problems.append("a fresh binding was not returned")
+if h.bound_pane("s2") != "":
+    problems.append("a binding leaked across session ids")
+h._write_json(h.pane_path("s3"), {"pane_key": "tab:leaf",
+                                  "at": time.time() - h.PANE_BINDING_MAX_AGE_SEC - 60})
+if h.bound_pane("s3") != "":
+    problems.append("a stale binding was accepted")
+h._write_json(h.pane_path("s4"), {"pane_key": "tab:leaf", "at": time.time() + 9999})
+if h.bound_pane("s4") != "":
+    problems.append("a future-dated binding was accepted")
+os.environ.pop("ORCA_PANE_KEY")
+if h.bind_pane("s5") is not False:
+    problems.append("binding succeeded with no pane key in the environment")
+for p in problems:
+    sys.stderr.write("  " + p + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The resume injection is keyed to THIS cycle asking for the compaction, not to
+# the global mode. Bound to the mode it gets both halves wrong: an automatic
+# compaction already continues the turn, so injecting adds a second one, while
+# a hand-run command in manual mode gets no injection at all.
+python3 - <<'PY' && ok "the self-fire intent is one-shot, pane-carrying and expiring" || bad "self-fire intent semantics are wrong"
+import os, sys, time, pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+if h.take_self_fire_intent("i0") != "":
+    problems.append("an absent intent returned a pane")
+h.set_self_fire_intent("i1", "tab:leaf")
+if h.take_self_fire_intent("i1") != "tab:leaf":
+    problems.append("the intent did not carry its pane")
+if h.take_self_fire_intent("i1") != "":
+    problems.append("the intent was not one-shot")
+h._write_json(h.intent_path("i2"), {"pane_key": "tab:leaf",
+                                    "at": time.time() - h.PANE_BINDING_MAX_AGE_SEC - 60})
+if h.take_self_fire_intent("i2") != "":
+    problems.append("a stale intent was accepted")
+for p in problems:
+    sys.stderr.write("  " + p + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The suite drives `resume` against real session ids. On a machine that has a
+# terminal driver the pane key resolves to the terminal the suite is RUNNING
+# IN, so an ungated injector types into the developer's own session mid-test.
+# That is not hypothetical -- it happened while this feature was being written.
+python3 - <<'PY' && ok "the injector refuses to spawn while the suite is running" || bad "the suite can spawn an injector into the developer's own terminal"
+import os, sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ.pop("SDP_PRECOMPACT_DRYRUN", None)
+sys.exit(0 if h.spawn_inject("tab:leaf", "text") is False else 1)
+PY
+
+# The resolved driver may be a command line, not a bare name, and a name that
+# is not installed must refuse rather than fall through to another one.
+python3 - <<'PY' && ok "the driver argv handles a command string and refuses a missing binary" || bad "driver argv handling is wrong"
+import os, sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+problems = []
+os.environ["ORCA_CLI_COMMAND"] = "/bin/echo --flag"
+argv = h.driver_argv(["terminal", "list"])
+if argv != ["/bin/echo", "--flag", "terminal", "list"]:
+    problems.append("command string not split into argv: %r" % (argv,))
+# A Windows path has backslashes; POSIX splitting would eat them.
+if os.name == "nt":
+    os.environ["ORCA_CLI_COMMAND"] = r"C:\Tools\orca.exe --flag"
+    argv = h.driver_argv(["x"])
+    if argv[:2] != [r"C:\Tools\orca.exe", "--flag"] and argv != []:
+        problems.append("windows path mangled: %r" % (argv,))
+else:
+    import shlex as _s
+    got = [w[1:-1] if len(w) > 1 and w[0] == w[-1] == '"' else w
+           for w in _s.split(r"C:\Tools\orca.exe --flag", posix=False)]
+    if got != [r"C:\Tools\orca.exe", "--flag"]:
+        problems.append("non-posix split would mangle a windows path: %r" % (got,))
+os.environ["ORCA_CLI_COMMAND"] = "/nonexistent/driver"
+if h.driver_argv(["x"]) != []:
+    problems.append("a missing binary did not refuse")
+if h.send_text("term_1", "text") is not False:
+    problems.append("send_text did not refuse a missing binary")
+os.environ.pop("ORCA_CLI_COMMAND")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Sidecars are not markers. doctor listing them as pending snapshot requests
+# is a false alarm, and a prune that skips them leaks one file per session.
+python3 - <<'PY' && ok "sidecar records are excluded from markers and reached by the prune" || bad "sidecar handling is wrong"
+import os, sys, time, pathlib, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+for suffix in h.SIDECAR_SUFFIXES:
+    if not suffix.endswith(".json"):
+        problems.append("sidecar suffix %r is not a .json" % suffix)
+old = time.time() - h.WINDOW_PRUNE_SEC - 60
+for name in ("s.window.json", "s.pane.json", "s.selffire.json"):
+    f = tmp / name
+    h._write_json(f, {"x": 1})
+    os.utime(f, (old, old))
+h._write_json(tmp / "s.json", {"state": "pending", "at": time.time()})
+h._prune_windows()
+left = sorted(p.name for p in tmp.iterdir())
+if left != ["s.json"]:
+    problems.append("prune left %r; only the real marker should remain" % (left,))
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The command must carry the queue step, or the model never calls it.
+# EVERY shipped copy, including the two that are hand-maintained rather than
+# generated. Those two are the ones Codex actually reads, and a round that
+# updated only the generated four left them describing the old, non-queueing
+# flow while the suite stayed green -- which is exactly how this was missed.
+for f in commands/precompact.md plugins/sdp/commands/precompact.md \
+         skills/precompact/SKILL.md plugins/sdp/skills/precompact/SKILL.md \
+         .agents/skills/precompact/SKILL.md .codex/prompts/precompact.md; do
+  grep -qF 'precompact_hook.py" compact' "$f" \
+    && ok "$f tells the command to queue the compaction" \
+    || bad "$f omits the compact step"
+  grep -qF 'compact "<snapshot path>"' "$f" \
+    && ok "$f passes the snapshot path explicitly" \
+    || bad "$f does not pass the snapshot path, so the binding is not deterministic"
+  grep -qF 'queued, not submitted' "$f" \
+    && ok "$f says exit 0 means queued, not submitted" \
+    || bad "$f implies the compaction was already submitted"
+  grep -qF 'walk UP its ancestors' "$f" \
+    && ok "$f locates the plugin by walking up from its own path" \
+    || bad "$f does not describe the ancestor walk"
+  # Guessing a cache version picks the wrong host's copy on one host, and a
+  # version this session never loaded on the other.
+  grep -qF 'Do not pick a version out of the install cache' "$f" \
+    && ok "$f forbids guessing a version out of the install cache" \
+    || bad "$f does not forbid guessing a cache version"
+  # CLAUDE_PLUGIN_ROOT is a hook variable. Measured absent from ordinary tool
+  # calls on BOTH hosts, where it expands to nothing and the path becomes
+  # /scripts/... -- so the step must not depend on it.
+  grep -q 'CLAUDE_PLUGIN_ROOT}/scripts/precompact_hook.py" compact' "$f" \
+    && bad "$f invokes the hook through CLAUDE_PLUGIN_ROOT, which tools do not have" \
+    || ok "$f does not depend on CLAUDE_PLUGIN_ROOT for the tool call"
+done
+
+# The documented rule has to hold for every place this file ships, which is
+# why it is a walk and not a fixed depth: the copies sit at four different
+# depths and the installed cache adds a fifth.
+python3 - <<'PY' && ok "every shipped command and skill copy resolves the plugin by the ancestor walk" || bad "a shipped copy cannot locate scripts/precompact_hook.py by walking up"
+import pathlib, sys
+copies = [
+    "plugins/sdp/commands/precompact.md", "plugins/sdp/skills/precompact/SKILL.md",
+    "commands/precompact.md", "skills/precompact/SKILL.md",
+    ".agents/skills/precompact/SKILL.md", ".codex/prompts/precompact.md",
+]
+problems = []
+for rel in copies:
+    src = pathlib.Path(rel).resolve()
+    if not src.is_file():
+        problems.append("%s is missing" % rel); continue
+    hit = next((a for a in src.parents if (a / "scripts" / "precompact_hook.py").is_file()), None)
+    if hit is None:
+        problems.append("%s: no ancestor has scripts/precompact_hook.py" % rel)
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+grep -qF 'Do not retry, and never guess a terminal.' plugins/sdp/commands/precompact.md \
+  && ok "the command forbids retrying or guessing a terminal" \
+  || bad "the command does not forbid guessing a terminal"
+
+# The bind hook has to be registered on BOTH hosts, or the tool has no pane to
+# look up on the host whose tool environment omits it.
+python3 - <<'PY' && ok "both host manifests keep three hooks with the same three verbs" || bad "a host manifest drifted from the three-verb contract"
+import json, sys
+want = ["precompact", "start", "stop"]
+for f in ("plugins/sdp/hooks/hooks.json", "plugins/sdp/hooks/hooks.codex.json"):
+    d = json.load(open(f))["hooks"]
+    verbs = sorted(hk["command"].rsplit(" ", 1)[-1]
+                   for es in d.values() for e in es for hk in e["hooks"])
+    if verbs != want:
+        sys.stderr.write("  %s verbs %r, want %r\n" % (f, verbs, want)); sys.exit(1)
+sys.exit(0)
+PY
 
 # ------------------------------------------------------------ config set --
 

@@ -30,11 +30,11 @@
     ],
     "SessionStart": [
       {
-        "matcher": "compact",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh\" resume",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh\" start",
             "timeout": 10,
             "shell": "bash"
           }

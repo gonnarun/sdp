@@ -893,8 +893,8 @@ for tree in (root / "hooks", root / "plugins" / "sdp" / "hooks"):
               for e in entries),
           "W18[%s]: every Claude command invokes the quoted plugin-root launcher" % label)
     check(sorted(e["command"].rsplit(" ", 1)[-1] for e in entries)
-          == ["precompact", "resume", "stop"],
-          "W18[%s]: the three verbs are stop/precompact/resume" % label)
+          == ["precompact", "start", "stop"],
+          "W18[%s]: the three verbs are stop/precompact/start" % label)
 
     # Codex: commandWindows must survive cmd.exe /C outer quoting -> no quotes at all.
     centries = [h for ev in codex["hooks"].values() for grp in ev for h in grp["hooks"]]
