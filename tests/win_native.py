@@ -56,7 +56,18 @@ def main() -> int:
               "(that is the whole point of it)")
         return 0
 
+    # This script's OWN stdout is cp1252 on a stock Windows runner, so printing a
+    # non-ASCII measurement kills the harness before it can report -- which is the
+    # very failure class A12 exists to measure. Fix the reporter, and never echo raw
+    # non-ASCII into it: the measurement is what survived the CHILD pipe, not what
+    # this console can render.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     print("python: %s" % sys.version.replace("\n", " "))
+    print("stdout encoding: %s" % (getattr(sys.stdout, "encoding", "?"),))
 
     # ---- A3: every entry point imports ------------------------------------
     try:
@@ -237,9 +248,13 @@ def main() -> int:
         wrapper.write_text('@echo off\r\n"%s" "%s"\r\n' % (sys.executable, emit))
         res = rg._run_argv([str(wrapper)], cwd=d, timeout_s=60, max_output=100000)
         seen = res.line or res.reason or ""
-        ok = "\uc548\ub155" in seen
-        measure("A12", "UTF-8 reviewer output %s (%r)"
-                % ("decoded intact" if ok else "did NOT survive", seen[:80]))
+        ok = "\uc548\ub155" in seen and "\u65e5\u672c\u8a9e" in seen
+        # Report codepoints, not glyphs: what matters is whether the bytes survived
+        # the child pipe, and echoing the glyphs makes the report depend on the
+        # console codepage -- a different question from the one being measured.
+        measure("A12", "UTF-8 reviewer output %s; non-ASCII codepoints seen: %s"
+                % ("decoded intact" if ok else "did NOT survive",
+                   [hex(ord(c)) for c in seen if ord(c) > 127][:8] or "none"))
 
     # ---- A14: os.replace under a concurrent open handle ------------------
     with tempfile.TemporaryDirectory() as td:
