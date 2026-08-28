@@ -44,11 +44,12 @@ from __future__ import annotations
 import functools
 import json
 import os
-import pwd
 import stat
 import sys
 import time
 from pathlib import Path
+
+import win_compat
 
 STATE_DIRNAME = "precompact-state"
 CONFIG_BASENAME = "precompact.json"
@@ -124,7 +125,7 @@ def passwd_home() -> Path:
     Same rule the gate uses: a poisoned $HOME must not be able to move the
     config or the state directory to somewhere an attacker controls.
     """
-    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    return Path(win_compat.passwd_home()).resolve(strict=True)
 
 
 def _selftest_override(name: str) -> str:
@@ -209,7 +210,9 @@ def _write_json(path: Path, payload: dict) -> bool:
     except OSError:
         pass
     tmp = path.with_name(path.name + ".tmp." + str(os.getpid()))
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    # getattr form: a bare os.O_NOFOLLOW raises AttributeError where the constant
+    # is absent, and AttributeError escapes the `except OSError` below.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(tmp, flags, 0o600)
     except OSError:

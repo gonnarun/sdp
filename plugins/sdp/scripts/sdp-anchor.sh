@@ -45,6 +45,16 @@ if [ -n "$DEFAULTS" ]; then
 else
   bd=".private/sdp-artifacts"
 fi
+# A native Windows path (C:\... or C:/...) is not absolute to this test, so it would
+# fall into the project-relative branch and be concatenated onto PROJECT_DIR, silently
+# producing a wrong BASE_DIR. The plugin's supported Windows invocation is Git Bash with
+# MSYS-form paths, so refuse rather than mis-resolve (ADR-W08).
+case "$bd" in
+  [A-Za-z]:[\\/]*)
+    printf 'sdp-anchor: base_dir looks like a native Windows path: %s\n' "$bd" >&2
+    printf 'sdp-anchor: use the Git Bash MSYS form instead (e.g. /c/Users/... not C:\\Users\\...)\n' >&2
+    exit 2 ;;
+esac
 case "$bd" in
   /*) BASE_DIR="$bd" ;;                 # absolute
   *)  BASE_DIR="$PROJECT_DIR/$bd" ;;    # project-relative

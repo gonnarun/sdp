@@ -6,12 +6,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import pwd
 import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
+
+import win_compat
 
 
 MAX_CONFIG_BYTES = 1_048_576
@@ -32,7 +33,9 @@ class ConfigSelection:
 
 
 def passwd_home() -> Path:
-    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    # Resolved from the OS identity API, never os.environ. The platform branch
+    # (and the POSIX-only module it needs) lives in win_compat; see ADR-W03.
+    return Path(win_compat.passwd_home()).resolve(strict=True)
 
 
 def _read_relative(base: Path, parts: tuple[str, ...], max_bytes: int) -> ConfigSelection | None:

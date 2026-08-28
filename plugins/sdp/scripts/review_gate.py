@@ -12,7 +12,6 @@ import errno
 import glob
 import json
 import os
-import pwd
 import re
 import secrets
 import shutil
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import config_discovery
+import win_compat
 
 
 # ---------------------------------------------------------------- ADR-004 seams
@@ -51,14 +51,11 @@ _ISATTY = os.isatty                      # FOURTH seam (B1). record_marker calls
 def _passwd_home() -> str:
     if _PASSWD_HOME is not None:
         return _PASSWD_HOME
-    return pwd.getpwuid(os.getuid()).pw_dir
+    return win_compat.passwd_home()
 
 
 def _passwd_name() -> str:
-    try:
-        return pwd.getpwuid(os.getuid()).pw_name
-    except KeyError:
-        return "sdp"
+    return win_compat.passwd_name("sdp")
 
 
 # Class 2 — endpoint/TLS/credential vars, sourced ONLY from ~/.sdp/gate-env.conf.
@@ -155,28 +152,11 @@ def _positive_int(raw: str | None, default: int, *, max_value: int = 3600) -> in
 def _safe_path() -> str:
     # Built from the PASSWD home (Class 0), at call time -- never at import time,
     # never via Path.home()/$HOME/expanduser. This is the D1 fix: a poisoned
-    # $HOME cannot move DEFAULT_SAFE_PATH[0] to an attacker directory.
+    # $HOME cannot move DEFAULT_SAFE_PATH[0] to an attacker directory. The
+    # per-platform directory list lives in win_compat.safe_path_dirs, which is
+    # given this home and reads no environment variable of its own (ADR-W06).
     home = _passwd_home()
-    dirs = [
-        os.path.join(home, ".local", "bin"),
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/opt/local/bin",
-    ]
-    # Per-user Node tool dirs: codex (and other reviewers) ship via nvm/npm/volta,
-    # which install under version-pinned dirs no fixed list can name. Globbed from
-    # the PASSWD home ONLY (never $HOME / $NVM_DIR), so a poisoned env cannot
-    # redirect resolution; every hit still faces all of _trusted_binary's checks
-    # (uid-owned, not group/world-writable, uid-owned parent, outside workspace).
-    for pattern in (
-        os.path.join(home, ".nvm", "versions", "node", "*", "bin"),
-        os.path.join(home, ".npm-global", "bin"),
-        os.path.join(home, ".volta", "bin"),
-    ):
-        dirs.extend(sorted(glob.glob(pattern), reverse=True))
-    return ":".join(dirs)
+    return os.pathsep.join(win_compat.safe_path_dirs(home))
 
 
 def _expand(raw: str) -> Path:
@@ -280,12 +260,21 @@ def _trusted_binary(name: str, root: Path) -> tuple[Path | None, str]:
     if not os.access(path, os.X_OK):
         return None, f"{name} binary is not executable"
 
-    uid = os.getuid() if hasattr(os, "getuid") else None
     st = path.stat()
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        return None, f"{name} binary is group/world writable"
-    if uid is not None and st.st_uid not in (0, uid):
-        return None, f"{name} binary owner is not current user/root"
+    if win_compat.posix_perms_meaningful():
+        uid = os.getuid()
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return None, f"{name} binary is group/world writable"
+        if st.st_uid not in (0, uid):
+            return None, f"{name} binary owner is not current user/root"
+    else:
+        # Windows: st_mode is synthesised and st_uid is always 0, so neither test
+        # means anything. Reparse-point rejection over the whole chain replaces
+        # them (ADR-W05 W05-b(1)); it is the control, not an addition.
+        try:
+            win_compat.reject_reparse_chain(_passwd_home(), path)
+        except OSError as exc:
+            return None, f"{name} binary path is not trusted: {exc}"
 
     # Parent-directory writability is intentionally NOT rejected here. The swap it
     # would enable (a TOCTOU replace between validation and exec) is closed at exec
@@ -319,11 +308,17 @@ def _gate_env_conf() -> dict[str, str]:
         if path.is_symlink() or not path.is_file():
             return result
         st = path.stat()
-        uid = os.getuid() if hasattr(os, "getuid") else None
-        if uid is not None and st.st_uid != uid:
-            return result
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            return result
+        if win_compat.posix_perms_meaningful():
+            uid = os.getuid()
+            if st.st_uid != uid:
+                return result
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return result
+        else:
+            try:
+                win_compat.reject_reparse_chain(_passwd_home(), path)
+            except OSError:
+                return result
         for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -371,7 +366,17 @@ def _path_ancestry_trusted(path: str) -> bool:
     # inheritable ACL on an ancestor that grants another local user rename rights --
     # is out of the personal-machine model; the temp dir's own ACL is stripped
     # (chmod -N) so the dir we exec from is POSIX-only regardless.
-    uid = os.getuid() if hasattr(os, "getuid") else None
+    if not win_compat.posix_perms_meaningful():
+        # Windows: every directory reads as 0o777 and st_uid is 0, so the POSIX
+        # walk below returns False for every path. Walk the same ancestry testing
+        # reparse points instead -- a junction is the substitution primitive this
+        # check exists to stop (ADR-W05 W05-b(1)).
+        try:
+            win_compat.reject_reparse_chain(_passwd_home(), Path(path))
+        except OSError:
+            return False
+        return True
+    uid = os.getuid()
     cur = Path(path)
     while True:
         try:
@@ -380,7 +385,7 @@ def _path_ancestry_trusted(path: str) -> bool:
             return False
         if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             return False
-        if uid is not None and st.st_uid not in (0, uid):
+        if st.st_uid not in (0, uid):
             return False
         parent = cur.parent
         if parent == cur:          # reached the root
@@ -404,6 +409,25 @@ def _toctou_safe_exec(path: Path) -> tuple[str | None, str | None, str]:
     # (EXDEV) it falls back to (path, None, "") -- exec by path -- which is adequate
     # where cross-FS implies a non-group-writable system dir (e.g. Linux /usr/bin).
     base = _passwd_home()
+    if not win_compat.posix_perms_meaningful():
+        # Windows: the hardlink pin cannot be used. A reviewer installed by npm is a
+        # .CMD shim that locates its own script from %~dp0, so exec'ing it from a
+        # temp dir makes it fail to find that script -- the pin would break the very
+        # thing it protects. W05-b(2) instead resolves once, rejects reparse points
+        # over the whole chain, and re-stats immediately before exec so the common
+        # substitution is detectable. This narrows the TOCTOU window; it does not
+        # close it (KNOWN_GAPS NC-30).
+        try:
+            win_compat.reject_reparse_chain(base, path)
+            st_pre = os.lstat(path)
+            if not stat.S_ISREG(st_pre.st_mode):
+                return None, None, "binary is not a regular file"
+            st_now = os.lstat(path)
+            if (st_now.st_size, st_now.st_mtime_ns) != (st_pre.st_size, st_pre.st_mtime_ns):
+                return None, None, "binary changed during validation"
+        except OSError as exc:
+            return None, None, f"binary path is not trusted: {exc}"
+        return str(path), None, ""
     try:
         tmpdir = tempfile.mkdtemp(prefix=".sdp-gate-", dir=base)
     except OSError:
@@ -460,13 +484,12 @@ def _toctou_safe_exec(path: Path) -> tuple[str | None, str | None, str]:
         _cleanup_exec(tmpdir)
         return None, None, f"fstat failed: {exc}"
     os.close(fd)
-    uid = os.getuid() if hasattr(os, "getuid") else None
     reason = ""
     if not stat.S_ISREG(st.st_mode):
         reason = "binary is not a regular file"
-    elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    elif win_compat.posix_perms_meaningful() and (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         reason = "binary is group/world writable"
-    elif uid is not None and st.st_uid not in (0, uid):
+    elif win_compat.posix_perms_meaningful() and st.st_uid not in (0, os.getuid()):
         reason = "binary owner is not current user/root"
     elif not (st.st_mode & 0o111):
         reason = "binary is not executable"
@@ -541,17 +564,11 @@ def _run_argv(
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except OSError:
-            proc.kill()
+        win_compat.kill_process_tree(proc, signal)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
+            win_compat.kill_process_tree_hard(proc, signal)
             # REQ-023: the process is already SIGKILLed; bound the final drain so
             # a setsid'd grandchild holding the pipe cannot wedge the loop forever.
             try:
@@ -866,6 +883,9 @@ def _audit_row(
         "exit_code": exit_code,
         "timeout": timeout,
         "config_source": config_source,
+        # ADR-W05 W05-b(3): an ALLOW produced without POSIX ownership verification
+        # must be distinguishable after the fact from one produced with it.
+        "trust": win_compat.trust_mode(),
     }
 
 
@@ -1045,11 +1065,17 @@ def _audit_base(root: Path) -> Path:
                 if resolved.is_symlink():
                     raise InfraError(f"SDP_BASE_DIR is a symlink: {raw}")
                 st = resolved.stat()
-                uid = os.getuid() if hasattr(os, "getuid") else None
-                if uid is not None and st.st_uid != uid:
-                    raise InfraError(f"SDP_BASE_DIR not uid-owned: {raw}")
-                if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                    raise InfraError(f"SDP_BASE_DIR group/world writable: {raw}")
+                if win_compat.posix_perms_meaningful():
+                    uid = os.getuid()
+                    if st.st_uid != uid:
+                        raise InfraError(f"SDP_BASE_DIR not uid-owned: {raw}")
+                    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                        raise InfraError(f"SDP_BASE_DIR group/world writable: {raw}")
+                else:
+                    try:
+                        win_compat.reject_reparse_chain(_passwd_home(), resolved)
+                    except OSError as exc:
+                        raise InfraError(f"SDP_BASE_DIR is not trusted: {exc}") from exc
         except OSError as exc:
             raise InfraError(f"SDP_BASE_DIR unusable: {exc}") from exc
         return resolved
@@ -1478,11 +1504,19 @@ def _override_requested(mode: str) -> bool:
         if tokfile.is_symlink() or not tokfile.is_file():
             return False
         st = tokfile.stat()
-        uid = os.getuid() if hasattr(os, "getuid") else None
-        if uid is not None and st.st_uid != uid:
-            return False
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            return False
+        if win_compat.posix_perms_meaningful():
+            uid = os.getuid()
+            if st.st_uid != uid:
+                return False
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+        else:
+            # A junction at ~/.sdp redirects the token path while the token file
+            # itself carries no reparse attribute, so the whole chain is walked.
+            try:
+                win_compat.reject_reparse_chain(_passwd_home(), tokfile)
+            except OSError:
+                return False
         want = tokfile.read_text(encoding="utf-8").strip()
     except OSError:
         return False
@@ -1523,11 +1557,19 @@ def _marker_token_ok() -> bool:
         if tokfile.is_symlink() or not tokfile.is_file():
             return False
         st = tokfile.stat()
-        uid = os.getuid() if hasattr(os, "getuid") else None
-        if uid is not None and st.st_uid != uid:
-            return False
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            return False
+        if win_compat.posix_perms_meaningful():
+            uid = os.getuid()
+            if st.st_uid != uid:
+                return False
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+        else:
+            # A junction at ~/.sdp redirects the token path while the token file
+            # itself carries no reparse attribute, so the whole chain is walked.
+            try:
+                win_compat.reject_reparse_chain(_passwd_home(), tokfile)
+            except OSError:
+                return False
         want = tokfile.read_text(encoding="utf-8").strip()
     except OSError:
         return False
@@ -1698,14 +1740,13 @@ def _inflight_active(path: Path) -> bool:
 
 @contextlib.contextmanager
 def _state_lock(lock_path: Path, deadline: float):
-    import fcntl
     import time
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(lock_path, win_compat.open_flags(os.O_CREAT, os.O_RDWR), 0o600)
     try:
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                win_compat.lock_exclusive(fd)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -1714,7 +1755,7 @@ def _state_lock(lock_path: Path, deadline: float):
         yield
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            win_compat.unlock(fd)
         finally:
             os.close(fd)
 
@@ -2656,6 +2697,9 @@ def doctor(cwd: str | None = None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # ADR-W05 W05-b(3): say once, on stderr, which controls are not in force.
+    # stdout carries the machine-parsed verdict line and must stay clean.
+    win_compat.warn_degraded_trust()
     parser = argparse.ArgumentParser(description="Run the SDP review gate.")
     parser.add_argument("--cwd", default=os.getcwd(), help="Workspace root for artifact validation")
     parser.add_argument(

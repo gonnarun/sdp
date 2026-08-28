@@ -31,12 +31,13 @@ test:
     run_segment: "bash tests/run_segment.sh"
     orca_dispatch: "bash tests/orca_dispatch.sh"
     precompact: "bash tests/precompact.sh"
+    win_compat: "bash tests/win_compat.sh"
   layers:
     # every layer name here must have a matching test.commands.<name>.
     # Downstream projects add their own layers AND the matching commands.
     mandatory: [smoke, integration, bump, packaging]
     risk_gated: [concurrency, mcp_server, review_gate, gate_marker]
-    supporting: [adapters, config_safety, docs, i18n, regression, run_segment, orca_dispatch, precompact]
+    supporting: [adapters, config_safety, docs, i18n, regression, run_segment, orca_dispatch, precompact, win_compat]
   db:
     isolation: dedicated_test_db
   guards:
