@@ -292,8 +292,19 @@ def _trusted_binary(name: str, root: Path) -> tuple[Path | None, str]:
         pst = parent.stat()
     except OSError:
         return None, f"{name} parent directory is not accessible"
-    if pst.st_mode & stat.S_IWOTH:
-        return None, f"{name} parent directory is world writable"
+    if win_compat.posix_perms_meaningful():
+        if pst.st_mode & stat.S_IWOTH:
+            return None, f"{name} parent directory is world writable"
+    else:
+        # Windows: NTFS reports every directory as 0o777, so the S_IWOTH test above
+        # would refuse every correctly installed reviewer. This check has no uid test
+        # beside it, which is why the uid-idiom enumeration missed it -- see
+        # fix_plan_windows-support_1.md BUG-001. Same substitute control as the
+        # binary's own check above (ADR-W05 W05-b(1)).
+        try:
+            win_compat.reject_reparse_chain(_passwd_home(), parent)
+        except OSError as exc:
+            return None, f"{name} parent directory is not trusted: {exc}"
     return path, ""
 
 

@@ -17,6 +17,11 @@
 #                            at the target itself (ADR-W05 W05-b(1)).
 #   W5  static bans        — no shipped script assigns os.getuid or resolves home
 #                            from the environment.
+#   W6  0777 parent        — the condition NTFS produces for EVERY directory. This
+#                            is the case the uid-idiom enumeration missed once
+#                            already (review_gate.py:295 has a mode test with no uid
+#                            test beside it), so it is asserted behaviourally in both
+#                            directions rather than by inspecting the source.
 #
 # Fixture location is load-bearing: _path_ancestry_trusted walks to the filesystem
 # root and /tmp is 0o1777 on macOS and Linux, so fixtures live under a directory
@@ -335,6 +340,81 @@ PY
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "W2/W3/W4: POSIX parity, resolvers and reparse-chain rejection"
 else bad "W2/W3/W4: see the FAIL lines above"; fi
+
+# ---- W6: a 0777 parent directory, in both directions -------------------------
+if python3 - "$SDP_ROOT/scripts" <<'W6PY'
+import builtins, os, sys, tempfile
+from pathlib import Path
+
+BLOCKED = {"pwd", "grp", "fcntl", "termios", "resource"}
+MISSING = ("getuid", "geteuid", "getgid", "getegid", "setuid", "setgid", "fork",
+           "forkpty", "setsid", "getpgid", "getpgrp", "setpgid", "killpg",
+           "O_NOFOLLOW", "O_CLOEXEC", "getgroups", "initgroups")
+
+sys.path.insert(0, sys.argv[1])
+import argparse, contextlib, dataclasses, datetime, errno, functools, glob, hashlib  # noqa: E401,F401
+import json, pathlib, re, secrets, shutil, signal, stat, subprocess, time  # noqa: E401,F401
+
+# Build the fixture on the REAL surface first: a binary whose parent is 0777,
+# which is what NTFS reports for every directory.
+import win_compat as _wc
+home = Path(_wc.passwd_home())
+tmp = Path(tempfile.mkdtemp(prefix=".sdp-w6-", dir=str(home)))
+try:
+    os.chmod(tmp, 0o700)
+    bindir = tmp / "bin"; bindir.mkdir()
+    exe = bindir / "faker"; exe.write_text("#!/bin/sh\nexit 0\n"); os.chmod(exe, 0o700)
+    root = tmp / "ws"; root.mkdir()
+
+    # (a) POSIX direction: a world-writable parent must STILL be refused, with the
+    # message unchanged. Nothing asserted this before; it is why the regression was
+    # invisible.
+    import review_gate as rg
+    rg._BINARY_RESOLVER = lambda name, _p=str(exe): _p if name == "faker" else None
+    os.chmod(bindir, 0o777)
+    got, reason = rg._trusted_binary("faker", root)
+    if not (got is None and reason == "faker parent directory is world writable"):
+        print("POSIX: 0777 parent was not refused: (%r, %r)" % (got, reason), file=sys.stderr)
+        raise SystemExit(1)
+
+    # (b) Windows direction: the SAME 0777 parent must be accepted, because every
+    # NTFS directory looks like this and refusing it blocks the gate permanently.
+    # Re-import the whole engine against the simulated surface in a child-like state.
+    for mod in ("review_gate", "config_discovery", "precompact_hook", "win_compat",
+                "sdp_mcp_server", "claude_gate"):
+        sys.modules.pop(mod, None)
+    _real = builtins.__import__
+    def _fake(n, *a, **k):
+        if n.split(".")[0] in BLOCKED:
+            raise ModuleNotFoundError("No module named %r" % n.split(".")[0])
+        return _real(n, *a, **k)
+    builtins.__import__ = _fake
+    for m in BLOCKED:
+        sys.modules.pop(m, None)
+    for attr in MISSING:
+        if hasattr(os, attr):
+            delattr(os, attr)
+    _real_name = os.name
+    os.name = "nt"
+    try:
+        import win_compat  # noqa: F811
+    finally:
+        os.name = _real_name
+    import review_gate as rgw
+    rgw._PASSWD_HOME = str(home)
+    rgw._BINARY_RESOLVER = lambda name, _p=str(exe): _p if name == "faker" else None
+    got, reason = rgw._trusted_binary("faker", root)
+    if got is None:
+        print("WINDOWS: a 0777 parent was refused (%r) -- every NTFS directory looks "
+              "like this, so the gate would be permanently blocked" % (reason,), file=sys.stderr)
+        raise SystemExit(1)
+finally:
+    import shutil as _sh
+    _sh.rmtree(tmp, ignore_errors=True)
+W6PY
+then ok "W6: a 0777 parent is refused on POSIX and accepted on the Windows surface"
+else bad "W6: 0777-parent handling is wrong in one of the two directions"
+fi
 
 # ---- W5: static bans (ADR-W02 / ADR-W03) ------------------------------------
 # AST-based, not grep: every one of these tokens appears in prose in the shipped
