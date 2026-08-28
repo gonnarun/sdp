@@ -53,3 +53,64 @@ jobs:
       # Every layer in .sdp/defaults.yaml. No network, no model calls.
       - name: Full suite
         run: bash tests/run.sh
+
+  # ---------------------------------------------------------------- Windows --
+  # The POSIX suite is NOT run here. It asserts symlinks, chmod semantics and
+  # fcntl, none of which mean the same thing on Windows, so running it would
+  # produce failures that say nothing about the port. What runs instead is the
+  # ADR-W10 acceptance matrix -- the cases that only a real Windows interpreter
+  # can answer, which every other test in this repository can only simulate.
+  #
+  # A11 (substitution by a second local account) is not automatable on a shared
+  # runner, and the Codex hook end-to-end needs an authenticated Codex CLI, so
+  # both stay unrun and KNOWN_GAPS NC-30 continues to say so.
+  windows-acceptance:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Same floor the POSIX jobs prove. The port is stdlib-only, so the
+          # minimum is the version that matters.
+          python-version: '3.9'
+
+      # A1/A2: the mandatory first step of /sdp:sdp, under Git Bash -- the only
+      # Windows invocation the plugin claims to support (ADR-W08).
+      - name: Anchor under Git Bash
+        shell: bash
+        run: |
+          set -eu
+          out="$(CLAUDE_PROJECT_DIR="$PWD" bash scripts/sdp-anchor.sh)"
+          echo "anchor said: $out"
+          test -f "$out" || { echo "A1 FAILED: no runtime env written"; exit 1; }
+          grep -q '^BASE_DIR=' "$out" || { echo "A1 FAILED: no BASE_DIR"; exit 1; }
+          echo "ok - [A1] the anchor writes a runtime env on Windows"
+
+      - name: Native Windows base_dir fails closed
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p .sdp-a2/.sdp
+          printf 'base_dir: C:\\Users\\evil\n' > .sdp-a2/.sdp/defaults.yaml
+          if CLAUDE_PROJECT_DIR="$PWD/.sdp-a2" bash scripts/sdp-anchor.sh >/dev/null 2>a2.err; then
+            echo "A2 FAILED: a native C:\ base_dir was accepted"; cat a2.err; exit 1
+          fi
+          grep -qi 'native Windows path' a2.err \
+            && echo "ok - [A2] a native C:\\ base_dir fails closed naming the MSYS form" \
+            || { echo "A2 FAILED: wrong diagnostic"; cat a2.err; exit 1; }
+
+      # A3-A10, A12-A15. Gate cases fail the job; measurements only report.
+      - name: Acceptance matrix
+        run: python tests/win_native.py
+
+      # The launcher the hooks go through, on the interpreter naming that made
+      # this necessary: python3 is not a guaranteed name here.
+      - name: Hook launcher resolves an interpreter
+        shell: bash
+        run: |
+          set -eu
+          echo '{}' | bash scripts/precompact_launcher.sh doctor > l.out 2>&1 \
+            && echo "ok - the launcher resolved a Python and ran the hook" \
+            || { echo "launcher FAILED"; cat l.out; exit 1; }
+          grep -q 'state dir' l.out || { echo "launcher produced no doctor output"; cat l.out; exit 1; }
