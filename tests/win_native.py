@@ -214,27 +214,32 @@ def main() -> int:
         d = Path(td)
         echo = d / "echo.cmd"
         reader = d / "r.py"
-        reader.write_text("import sys; d=sys.stdin.read(); print('BYTES', len(d))\n")
+        # Emit a real verdict line: _run_argv classifies anything else as infra and
+        # parks the text in .reason, so a stub that prints bare text would be
+        # asserting against the error path rather than the working one.
+        reader.write_text("import sys; d=sys.stdin.read(); print('ALLOW: BYTES', len(d))\n")
         echo.write_text('@echo off\r\n"%s" "%s"\r\n' % (sys.executable, reader))
         big = "x" * 20000
         res = rg._run_argv([str(echo)], cwd=d, timeout_s=60, max_output=100000,
                            stdin_text=big)
-        got = "BYTES 20000" in (res.stdout or "")
+        got = "BYTES 20000" in (res.line or "")
         gate(got, "A13", "a 20000-character prompt reaches the child over stdin "
-                         "(the argv route caps at 8191)")
+                         "(the argv route caps at 8191); child said %r"
+                         % ((res.line or res.reason or "").strip()[:48],))
 
     # ---- A12: non-ASCII reviewer output decodes --------------------------
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         emit = d / "e.py"
         emit.write_text("import sys; sys.stdout.reconfigure(encoding='utf-8'); "
-                        "print('\\uc548\\ub155 \\u65e5\\u672c\\u8a9e')\n")
+                        "print('ALLOW: \\uc548\\ub155 \\u65e5\\u672c\\u8a9e')\n")
         wrapper = d / "e.cmd"
         wrapper.write_text('@echo off\r\n"%s" "%s"\r\n' % (sys.executable, emit))
         res = rg._run_argv([str(wrapper)], cwd=d, timeout_s=60, max_output=100000)
-        ok = "\uc548\ub155" in (res.stdout or "")
-        measure("A12", "UTF-8 reviewer output %s (stdout=%r)"
-                % ("decoded intact" if ok else "did NOT survive", (res.stdout or "")[:80]))
+        seen = res.line or res.reason or ""
+        ok = "\uc548\ub155" in seen
+        measure("A12", "UTF-8 reviewer output %s (%r)"
+                % ("decoded intact" if ok else "did NOT survive", seen[:80]))
 
     # ---- A14: os.replace under a concurrent open handle ------------------
     with tempfile.TemporaryDirectory() as td:
