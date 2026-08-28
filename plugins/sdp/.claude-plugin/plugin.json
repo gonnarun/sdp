@@ -1,6 +1,6 @@
 {
   "name": "sdp",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "description": "Shared staged-workflow & worktree dispatch plugin \u2014 language-agnostic SOP core, a codex review gate that works with or without any companion plugin, real-world test enforcement, and resource-aware escalation.",
   "author": {
     "name": "run2u"

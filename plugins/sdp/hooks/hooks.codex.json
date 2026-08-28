@@ -1,5 +1,5 @@
 {
-  "_comment": "Codex only; declared by .codex-plugin/plugin.json. Claude Code reads hooks/hooks.json. commandWindows is quote-free and space-free after the fixed powershell path, because Codex wraps the whole line for cmd.exe /C (openai/codex#38168). The commandWindows payload is precompact_windows.ps1 with comment and blank lines removed, base64 of UTF-16LE; tests/win_compat.sh reproduces that transform and asserts the payload matches, so the two cannot drift.",
+  "description": "Codex only; declared by .codex-plugin/plugin.json. Claude Code reads hooks/hooks.json. commandWindows is quote-free and space-free after the fixed powershell path, because Codex wraps the whole line for cmd.exe /C (openai/codex#38168). The commandWindows payload is precompact_windows.ps1 with comment and blank lines removed, base64 of UTF-16LE; tests/win_compat.sh reproduces that transform and asserts the payload matches, so the two cannot drift.",
   "hooks": {
     "Stop": [
       {

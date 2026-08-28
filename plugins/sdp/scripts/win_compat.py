@@ -398,6 +398,25 @@ def open_flags(*extra: int) -> int:
     return flags | getattr(os, "O_BINARY", 0)
 
 
+def from_msys_path(path: str) -> str:
+    """Translate a Git Bash MSYS path (/c/Users/x) to native form (C:\\Users\\x).
+
+    DISPLAY AND COMPARISON ONLY. `sdp-anchor.sh` runs under Git Bash and records
+    MSYS-form paths, but Python on Windows resolves `/c/Users/x` to `D:\\c\\Users\\x`
+    -- an entirely different place -- so `doctor` compared two spellings of the same
+    directory and reported a freshly anchored project as STALE.
+
+    Deliberately NOT used for any security decision. Nothing is trusted because this
+    function said two paths match; it only stops a health check from lying. The
+    resolvers, the reparse chain and the safe path all keep working on real paths.
+    """
+    if not IS_WINDOWS:
+        return path
+    if len(path) > 2 and path[0] == "/" and path[2] == "/" and path[1].isalpha():
+        return path[1].upper() + ":\\" + path[3:].replace("/", "\\")
+    return path
+
+
 # ------------------------------------------------------------- reviewer search
 
 def safe_path_dirs(home: str) -> list[str]:

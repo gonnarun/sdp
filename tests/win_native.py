@@ -270,6 +270,23 @@ def main() -> int:
         finally:
             handle.close()
 
+    # ---- A1b: doctor must not call a fresh anchor STALE (field report) -----
+    # A real 0.1.71 install reported a freshly anchored project as STALE, because the
+    # anchor runs under Git Bash and records /c/... while this engine sees C:\...
+    # Display-only, but it tells the operator their engine is wrong when it is not.
+    subprocess.run(["bash", str(REPO / "scripts" / "sdp-anchor.sh")],
+                   cwd=str(REPO), capture_output=True, text=True,
+                   env={**os.environ, "CLAUDE_PROJECT_DIR": str(REPO)})
+    lines: list[str] = []
+    try:
+        rg._doctor_anchor(REPO, lines)
+        joined = " ".join(lines)
+        gate("STALE" not in joined,
+             "A1", "doctor does not report a freshly anchored project as STALE: %s"
+                   % (joined[:140] or "(no anchor line)"))
+    except BaseException as exc:
+        measure("A1", "doctor anchor check unavailable: %r" % (exc,))
+
     print()
     for m in MEASUREMENTS:
         print("measurement: %s" % m)

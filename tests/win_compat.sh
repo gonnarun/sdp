@@ -898,6 +898,15 @@ for tree in (root / "hooks", root / "plugins" / "sdp" / "hooks"):
 
     # Codex: commandWindows must survive cmd.exe /C outer quoting -> no quotes at all.
     centries = [h for ev in codex["hooks"].values() for grp in ev for h in grp["hooks"]]
+    # Codex validates the TOP LEVEL strictly: "unknown field `_comment`, expected
+    # `description` or `hooks`". A rejected manifest makes codex emit an error item,
+    # which the gate's fail-closed tool-purity check reads as contamination and turns
+    # into INFRA_ERROR -- so a stray key costs a working gate. Reported from a real
+    # Windows install on 2026-08-28; the earlier version of this test checked the
+    # hook entries and never looked at the keys around them.
+    check(set(codex) <= {"description", "hooks"},
+          "W18[%s]: the Codex manifest's top level uses only keys codex accepts (has %s)"
+          % (label, sorted(codex)))
     check(len(centries) == 3, "W18[%s]: Codex manifest declares three hooks" % label)
     check(all("commandWindows" in e for e in centries),
           "W18[%s]: every Codex hook carries a commandWindows" % label)

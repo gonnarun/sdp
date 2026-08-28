@@ -2691,7 +2691,13 @@ def _doctor_anchor(root: Path, lines: list[str]) -> None:
     if not recorded_root:
         lines.append(f"  anchor: MALFORMED (no SDP_ROOT in {env_path})")
         return
-    if _same_dir(recorded_root, running_root):
+    # The anchor runs under Git Bash and records an MSYS path; this engine sees the
+    # native one. Comparing them raw made doctor report every fresh Windows anchor as
+    # STALE (reported from a real install, 2026-08-28). Translation is for the
+    # comparison only -- see win_compat.from_msys_path.
+    if _same_dir(recorded_root, running_root) or _same_dir(
+        win_compat.from_msys_path(recorded_root), running_root
+    ):
         detail = f"{recorded_ver or 'version unrecorded'}"
         if anchored_at:
             detail += f", anchored {anchored_at}"
