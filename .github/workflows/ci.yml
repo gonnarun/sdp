@@ -106,11 +106,40 @@ jobs:
 
       # The launcher the hooks go through, on the interpreter naming that made
       # this necessary: python3 is not a guaranteed name here.
+      #
+      # What is under test is the LAUNCHER CONTRACT -- did it resolve a Python and
+      # run the hook -- not whether precompact automation happens to be enabled.
+      # `doctor` exits 1 on a fresh runner because mode is unset, which is the
+      # documented fail-close default; asserting on its exit status would be
+      # asserting on configuration, and 127 is the launcher's own "no interpreter
+      # found" code, so that is the status that actually means failure here.
       - name: Hook launcher resolves an interpreter
         shell: bash
         run: |
           set -eu
-          echo '{}' | bash scripts/precompact_launcher.sh doctor > l.out 2>&1 \
-            && echo "ok - the launcher resolved a Python and ran the hook" \
-            || { echo "launcher FAILED"; cat l.out; exit 1; }
-          grep -q 'state dir' l.out || { echo "launcher produced no doctor output"; cat l.out; exit 1; }
+          set +e
+          echo '{}' | bash scripts/precompact_launcher.sh doctor > l.out 2>&1
+          rc=$?
+          set -e
+          cat l.out
+          [ "$rc" -ne 127 ] || { echo "FAILED: the launcher found no interpreter"; exit 1; }
+          grep -q 'state dir' l.out \
+            || { echo "FAILED: the hook did not run through the launcher"; exit 1; }
+          echo "ok - the launcher resolved a Python and ran the hook (doctor rc=$rc)"
+
+      # The loud-failure contract: an unresolvable interpreter must never look like
+      # a hook that ran and did nothing. That silent shape is the whole reason the
+      # Codex Windows hook bug is hard to notice.
+      - name: Hook launcher fails loudly with no interpreter
+        shell: bash
+        run: |
+          set -eu
+          set +e
+          env PATH=/nonexistent /usr/bin/bash scripts/precompact_launcher.sh stop </dev/null >n.out 2>&1
+          rc=$?
+          set -e
+          cat n.out
+          [ "$rc" -eq 127 ] || { echo "FAILED: expected 127, got $rc"; exit 1; }
+          grep -qi 'no Python' n.out \
+            || { echo "FAILED: no diagnostic on stderr"; exit 1; }
+          echo "ok - no interpreter resolvable -> exit 127 with a diagnostic, never a silent 0"
