@@ -176,8 +176,11 @@ sanctioned without these would turn an accident into a supported bypass:
 Child freshness is decided **inside each child's own lock**, and "fresh" means the log holds no live
 record — not that its counter reads zero. An `ALLOW`, a team marker, a stall or a seed written by a
 different parent all pass a counter check and are all state a split must not adopt. The one tolerated
-residue is a retracted seed (`SPLIT_CHILD_OF` followed by `SPLIT_CHILD_ABANDONED`), which is what a
-split that failed mid-flight leaves behind, so the same split can be retried with the same artifacts.
+residue is a retracted seed — a `SPLIT_CHILD_OF` followed by a `SPLIT_CHILD_ABANDONED` that names it
+(`parent=<key> seed=<the seed line's stamp>`) — which is what a split that failed mid-flight leaves
+behind, so the same split can be retried with the same artifacts. A retraction that names no seed,
+names a different one, or arrives twice does **not** clear anything: it marks the log as carrying
+state, so appending one line cannot launder a live parent link or the chain depth it carries.
 
 **What is not checked:** that the children are a narrower *scope*. Byte-identical copies are refused;
 a child differing by one character is not. The ceremony is what stands behind the rest — see NC-33.

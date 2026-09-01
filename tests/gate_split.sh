@@ -406,5 +406,101 @@ grep -qE '^SPLIT_CHILD_OF .* depth=1' "$ACHILD" \
   && ok "(J8) the retry seeds a live link at the right depth" \
   || bad "(J8) retry did not seed the child"
 
+# ---------------------------------------------------------------------------
+# K. ROUND-2 REVIEW FINDINGS -- the retraction must name the seed it retracts,
+#    and the content comparison must fail closed.
+# ---------------------------------------------------------------------------
+seed_child() {   # $1 = project, $2 = child artifact, $3.. = extra log lines
+  local proj="$1" art="$2"; shift 2
+  local log; log="$(logpath "$proj" "$art")"
+  mkdir -p "$(dirname "$log")"
+  printf 'SPLIT_CHILD_OF 2026-01-01T00:00:00Z parent=other_deadbeef parent_round=4 depth=1\n' > "$log"
+  for extra in "$@"; do printf '%s\n' "$extra" >> "$log"; done
+  printf '%s' "$log"
+}
+
+L="$TMP/residue"; mkdir -p "$L/.sdp"; printf 'plan\n' > "$L/plan.md"
+printf 'child a\n' > "$L/a.md"; printf 'child b\n' > "$L/b.md"; gates "$L" 2 2
+set_claude_verdict "BLOCK: seed"
+drive "$L" "$L/plan.md" 2 residue
+H --cwd "$L" --reviewer claude review "$L/plan.md" >/dev/null 2>&1
+
+# A live seed from ANOTHER parent is state: this child is spoken for.
+seed_child "$L" "$L/a.md" >/dev/null
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$L" record-split "$L/plan.md" --split-child "$L/a.md" --split-child "$L/b.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'already carries gate state'; } \
+  && ok "(K1) a child already seeded by another parent is refused" \
+  || bad "(K1) a child owned by another split was adopted"
+
+# An UNBOUND retraction must not clear that seed -- otherwise appending one line
+# launders the chain depth away.
+seed_child "$L" "$L/a.md" "SPLIT_CHILD_ABANDONED 2026-01-02T00:00:00Z" >/dev/null
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$L" record-split "$L/plan.md" --split-child "$L/a.md" --split-child "$L/b.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'already carries gate state'; } \
+  && ok "(K2) a retraction naming no seed does not clear one" \
+  || bad "(K2) an unbound SPLIT_CHILD_ABANDONED laundered a live seed"
+
+# A retraction naming a DIFFERENT seed is equally inert.
+seed_child "$L" "$L/a.md" \
+  "SPLIT_CHILD_ABANDONED 2026-01-02T00:00:00Z parent=other_deadbeef seed=1999-01-01T00:00:00Z" >/dev/null
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$L" record-split "$L/plan.md" --split-child "$L/a.md" --split-child "$L/b.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'already carries gate state'; } \
+  && ok "(K3) a retraction naming a different seed does not clear this one" \
+  || bad "(K3) a mismatched retraction cleared a live seed"
+
+# The matching retraction IS honoured -- that is what makes a failed split retryable.
+seed_child "$L" "$L/a.md" \
+  "SPLIT_CHILD_ABANDONED 2026-01-02T00:00:00Z parent=other_deadbeef seed=2026-01-01T00:00:00Z" >/dev/null
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$L" record-split "$L/plan.md" --split-child "$L/a.md" --split-child "$L/b.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^SPLIT: plan.md closed'; } \
+  && ok "(K4) a retraction naming its own seed restores freshness" \
+  || bad "(K4) a matched retraction did not restore freshness"
+
+# Content comparison: unreadable and oversized children are refusals, not skips.
+M="$TMP/content"; mkdir -p "$M/.sdp"; printf 'the plan\n' > "$M/plan.md"
+printf 'a\n' > "$M/a.md"; printf 'b\n' > "$M/b.md"; gates "$M" 2 2
+drive "$M" "$M/plan.md" 2 content
+H --cwd "$M" --reviewer claude review "$M/plan.md" >/dev/null 2>&1
+chmod 000 "$M/a.md"
+out="$(H --cwd "$M" prepare-split "$M/plan.md" --split-child "$M/a.md" \
+        --split-child "$M/b.md" --split-rationale "two concerns" 2>&1)"
+chmod 644 "$M/a.md"
+printf '%s' "$out" | grep -qE 'FAIL \(8\).*(unreadable|Permission)' \
+  && ok "(K5) an unreadable child is refused, not silently skipped" \
+  || bad "(K5) an unreadable child passed the content check"
+python3 -c "open('$M/big.md','w').write('x' * 600000)"
+out="$(H --cwd "$M" prepare-split "$M/plan.md" --split-child "$M/big.md" \
+        --split-child "$M/b.md" --split-rationale "two concerns" 2>&1)"
+printf '%s' "$out" | grep -q 'FAIL (8).*larger than the' \
+  && ok "(K6) a child past the artifact cap is refused (a prefix hash would lie)" \
+  || bad "(K6) an oversized child was compared by prefix"
+
+# An append failure mid-seed must leave the parent unsealed. (The retraction
+# itself cannot be observed here: the harness's append seam fails every call
+# after the budget, so the compensating append fails too -- which is the
+# fail-closed direction, the child stays visibly spoken for.)
+FA="$TMP/appendfail"; mkdir -p "$FA/.sdp"; printf 'plan\n' > "$FA/plan.md"
+printf 'a\n' > "$FA/a.md"; printf 'b\n' > "$FA/b.md"; gates "$FA" 2 2
+drive "$FA" "$FA/plan.md" 2 appendfail
+H --cwd "$FA" --reviewer claude review "$FA/plan.md" >/dev/null 2>&1
+FALOG="$(logpath "$FA" "$FA/plan.md")"
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        SDP_MARKER_HUMAN=sekret python3 "$HARNESS" --binary-resolver "$RES" \
+          --passwd-home "$HOMEFIX" --isatty true --append-fail-after 1 -- \
+          --cwd "$FA" record-split "$FA/plan.md" --split-child "$FA/a.md" \
+          --split-child "$FA/b.md" --split-rationale "two concerns" \
+          --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && ! grep -q '^SPLIT ' "$FALOG"; } \
+  && ok "(K7) an append failure during seeding leaves the parent unsealed" \
+  || bad "(K7) the parent closed despite a failed seed"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

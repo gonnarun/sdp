@@ -1308,8 +1308,13 @@ class _LogState:
     # own claim, so it cannot be talked up.
     distinct_reasons: int = 0
     # True while a SPLIT_CHILD_OF stands un-retracted: this artifact is a child of a
-    # split. Cleared by SPLIT_CHILD_ABANDONED (codex review F3).
+    # split. Cleared ONLY by a SPLIT_CHILD_ABANDONED naming that exact seed.
     split_pending: bool = False
+    # Round-2 codex review F2. Seed/retraction lines that do not form matched pairs --
+    # a retraction with no live seed, one naming a different seed, a duplicate -- are
+    # NOT tolerated residue. The flag makes such a log count as carrying state, so a
+    # stray or mismatched retraction can never make an artifact look fresh.
+    split_residue_bad: bool = False
 
 
 def _parse_log(log: Path) -> _LogState:
@@ -1332,6 +1337,8 @@ def _parse_log(log: Path) -> _LogState:
     split_closed = False
     split_depth = 0
     split_pending = False
+    split_residue_bad = False
+    split_seed: tuple[str, str] = ("", "")
     reason_hashes: set[str] = set()
     for raw in text.splitlines():
         line = raw.strip()
@@ -1399,15 +1406,33 @@ def _parse_log(log: Path) -> _LogState:
             # by a split no audit row backs.
             split_closed = False
         elif head == "SPLIT_CHILD_ABANDONED":
-            # Codex review F3. A split that failed AFTER seeding this child leaves a
-            # SPLIT_CHILD_OF asserting a relationship the parent never committed.
-            # The compensating append retracts it: the linkage and the depth it
-            # carried are gone, and the freshness rule below re-admits the child, so
-            # the same children can be retried. Without this, a mid-flight failure
-            # made the split unrepeatable with the artifacts it was for.
-            split_depth = 0
-            split_pending = False
+            # A split that failed AFTER seeding this child leaves a SPLIT_CHILD_OF
+            # asserting a relationship the parent never committed. The compensating
+            # append retracts it, so the same children can be retried -- but it must
+            # name WHICH seed it retracts (`parent=` + `seed=`, the seed line's own
+            # stamp). An unbound retraction used to clear any pending seed and reset
+            # the depth, which is depth laundering: append one line to a legitimately
+            # seeded child and the chain cap forgets it. Unmatched lines now mark the
+            # log as carrying state instead of clearing anything.
+            fields = dict(
+                tok.split("=", 1) for tok in parts[1:] if "=" in tok
+            )
+            if (
+                split_pending
+                and fields.get("parent")
+                and fields.get("seed")
+                and (fields["parent"], fields["seed"]) == split_seed
+            ):
+                split_depth = 0
+                split_pending = False
+                split_seed = ("", "")
+            else:
+                split_residue_bad = True
         elif head == "SPLIT_CHILD_OF":
+            if split_pending:
+                # A second live seed means two parents claim this artifact. Neither
+                # is trusted: the log carries state either way.
+                split_residue_bad = True
             # Seeded into a CHILD's fresh log by record-split. It carries the chain
             # depth, which is what `halt.split_depth_cap` is measured against; the
             # child's own counter still starts at zero, which is the whole point of
@@ -1420,6 +1445,10 @@ def _parse_log(log: Path) -> _LogState:
                         # Unparsable depth is treated as the cap-exceeding case by
                         # _split_checks, never as depth 0 (fail-closed).
                         split_depth = max(split_depth, sys.maxsize)
+            _seed_fields = dict(
+                tok.split("=", 1) for tok in parts[1:] if "=" in tok
+            )
+            split_seed = (_seed_fields.get("parent", ""), parts[1] if len(parts) > 1 else "")
             split_pending = True
         elif head == SPLIT_RATIONALE_PREFIX.strip():
             # Human-authored prose, persisted and INERT -- same contract as REASON.
@@ -1445,7 +1474,8 @@ def _parse_log(log: Path) -> _LogState:
             blocks_since_marker += 1
     return _LogState(count, hashes[-2:], last_marker, last_block_ts, pivot_count,
                      stall_run, stall_trailing, blocks_since_marker,
-                     split_closed, split_depth, len(reason_hashes), split_pending)
+                     split_closed, split_depth, len(reason_hashes), split_pending,
+                     split_residue_bad)
 
 
 def _ts_to_epoch(ts: str) -> float:
@@ -2760,20 +2790,36 @@ def _content_distinct(artifact: Path, children: list[Path]) -> tuple[bool, str]:
     """
     import hashlib
 
-    def digest(path: Path) -> str | None:
+    def digest(path: Path) -> tuple[str | None, str]:
+        # Round-2 codex review F3. Reads AT the cap, never past it, and an oversized
+        # or unreadable file is a REFUSAL rather than a silently skipped comparison:
+        # hashing a prefix would call two different files identical, and skipping
+        # would let an unreadable child through the one content check there is.
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return None, f"{path.name} is unreadable ({exc.strerror or exc})"
+        if size > DEFAULT_MAX_ARTIFACT_BYTES:
+            return None, (
+                f"{path.name} is larger than the {DEFAULT_MAX_ARTIFACT_BYTES}-byte artifact "
+                "cap, so it cannot be compared"
+            )
         try:
             with open(path, "rb") as handle:
-                return hashlib.sha256(handle.read(DEFAULT_MAX_ARTIFACT_BYTES + 1)).hexdigest()
-        except OSError:
-            return None   # unreadable is refused by (2)'s existence check, not here
+                data = handle.read(DEFAULT_MAX_ARTIFACT_BYTES)
+        except OSError as exc:
+            return None, f"{path.name} is unreadable ({exc.strerror or exc})"
+        return hashlib.sha256(data).hexdigest(), ""
 
-    parent = digest(artifact)
+    parent, why = digest(artifact)
+    if parent is None:
+        return False, why
     seen: dict[str, Path] = {}
     for child in children:
-        d = digest(child)
+        d, why = digest(child)
         if d is None:
-            continue
-        if parent is not None and d == parent:
+            return False, why
+        if d == parent:
             return False, f"{child.name} is byte-identical to the parent"
         if d in seen:
             return False, f"{child.name} is byte-identical to {seen[d].name}"
@@ -3005,7 +3051,7 @@ def record_split(
                 with _state_lock(child_paths["lock"], time.monotonic() + 30):
                     live = _live_child_records(child_paths["log"])
                     if live:
-                        _abandon_seeds(seeded_paths, stamp)
+                        _abandon_seeds(seeded_paths, key, stamp)
                         return _refuse(
                             f"child {child.name} already carries gate state ({live}); "
                             "split children must be fresh artifacts; nothing was written"
@@ -3015,16 +3061,20 @@ def record_split(
                         f"SPLIT_CHILD_OF {stamp} parent={key} parent_round={prior} depth={depth}",
                     ):
                         raise InfraError(f"SPLIT_CHILD_OF append failed for {child.name}")
+                    # Round-2 codex review F1: registered HERE, not after the
+                    # rationale lines. A rationale append that fails between the two
+                    # used to leave this child's seed live while the retraction only
+                    # reached its predecessors.
+                    seeded_paths.append((child_key, child_paths))
                     for line in _split_rationale_lines(rationale):
                         if not _APPEND_LINE(child_paths["log"], line):
                             raise InfraError(f"SPLIT_RATIONALE append failed for {child.name}")
             except InfraError:
                 # Codex review F3: never leave a seed standing for a split that did
                 # not commit. Retract what was already written, then re-raise.
-                _abandon_seeds(seeded_paths, stamp)
+                _abandon_seeds(seeded_paths, key, stamp)
                 raise
             seeded.append(child_key)
-            seeded_paths.append((child_key, child_paths))
 
         # ---- then seal the parent -------------------------------------------
         try:
@@ -3038,7 +3088,7 @@ def record_split(
                 raise InfraError("SPLIT append failed")
         except InfraError:
             # The parent never closed, so the children must not keep claiming it did.
-            _abandon_seeds(seeded_paths, stamp)
+            _abandon_seeds(seeded_paths, key, stamp)
             raise
 
         result = {
@@ -3061,7 +3111,7 @@ def record_split(
             # rather than sealed by a split nothing audited. Codex review F3: the
             # child seeds are retracted with it, so the same split can be retried
             # with the same artifacts instead of being permanently unrepeatable.
-            _abandon_seeds(seeded_paths, _now_z())
+            _abandon_seeds(seeded_paths, key, stamp)
             if not _write_flag(
                 paths["infra_flag"], "split audit row not written; split invalidated\n"
             ):
@@ -3117,11 +3167,20 @@ def _live_child_records(log: Path) -> str:
             heads.append(head)
     if heads:
         return ",".join(sorted(set(heads)))
-    # Only seed residue: live if the last seed was never retracted.
-    return "SPLIT_CHILD_OF" if _parse_log(log).split_pending else ""
+    # Only seed residue. It is tolerated ONLY when every seed is matched by a
+    # retraction naming it: a live seed, a stray retraction, a duplicate seed or a
+    # mismatched pair all mean the log carries state we cannot explain away.
+    state = _parse_log(log)
+    if state.split_pending:
+        return "SPLIT_CHILD_OF"
+    if state.split_residue_bad:
+        return "unmatched SPLIT_CHILD_OF/SPLIT_CHILD_ABANDONED records"
+    return ""
 
 
-def _abandon_seeds(seeded: list[tuple[str, dict[str, "Path"]]], stamp: str) -> None:
+def _abandon_seeds(
+    seeded: list[tuple[str, dict[str, "Path"]]], parent_key: str, seed_stamp: str
+) -> None:
     """Retract every child seed written by a split that did not commit (F3).
 
     Best-effort BY DESIGN: this runs on a failure path, and raising here would
@@ -3133,7 +3192,10 @@ def _abandon_seeds(seeded: list[tuple[str, dict[str, "Path"]]], stamp: str) -> N
     for _key, child_paths in seeded:
         with contextlib.suppress(Exception):
             with _state_lock(child_paths["lock"], time.monotonic() + 10):
-                _APPEND_LINE(child_paths["log"], f"SPLIT_CHILD_ABANDONED {stamp}")
+                _APPEND_LINE(
+                    child_paths["log"],
+                    f"SPLIT_CHILD_ABANDONED {_now_z()} parent={parent_key} seed={seed_stamp}",
+                )
 
 
 def _split_rationale_lines(text: str) -> list[str]:
