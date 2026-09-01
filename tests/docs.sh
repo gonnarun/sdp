@@ -295,20 +295,10 @@ for f in core/Stage4_design_plan.md plugins/sdp/core/Stage4_design_plan.md; do
     || bad "(xi-a) $f LOST the sanctioned record-marker sentence (P6 re-divergence)"
 done
 
-# (b) each host's gate CLI command block names the OPPOSITE reviewer (no self-review)
-gate_cmds() { grep 'review_gate.py' "$1" | grep 'no preamble.'; }
-for f in plugins/sdp/core/Stage4_design_plan.md plugins/sdp/core/Stage7_test_exec.md; do
-  t=$(gate_cmds "$f" | wc -l | tr -d ' '); w=$(gate_cmds "$f" | grep -c -- '--reviewer claude')
-  { [ "$t" -gt 0 ] && [ "$t" = "$w" ]; } \
-    && ok "(xi-b) $f: all $t gate command block(s) pin --reviewer claude (codex host cannot self-review)" \
-    || bad "(xi-b) $f: only $w/$t gate command block(s) pin --reviewer claude"
-done
-for f in core/Stage4_design_plan.md core/Stage7_test_exec.md; do
-  t=$(gate_cmds "$f" | wc -l | tr -d ' '); w=$(gate_cmds "$f" | grep -c -- '--reviewer codex')
-  { [ "$t" -gt 0 ] && [ "$t" = "$w" ]; } \
-    && ok "(xi-b) $f: all $t gate command block(s) pin --reviewer codex" \
-    || bad "(xi-b) $f: only $w/$t gate command block(s) pin --reviewer codex"
-done
+# (b) reviewer direction. NOTE: the core is NOT per-host -- both hosts read
+# plugins/sdp/core (Claude via ${CLAUDE_PLUGIN_ROOT}/core/SDP.md in commands/*.md,
+# Codex via core/SDP.md from skills/*). A reviewer pinned there is inverted on one
+# of them, which is issue #3. The core is asserted host-neutral in (xiv) instead.
 # Codex-side skills invoke the gate too; their review calls must pin --reviewer claude.
 for f in plugins/sdp/skills/sdp/SKILL.md plugins/sdp/skills/batch-sdp/SKILL.md plugins/sdp/skills/worktree-dispatch/SKILL.md \
          skills/sdp/SKILL.md skills/batch-sdp/SKILL.md skills/worktree-dispatch/SKILL.md; do
@@ -329,29 +319,8 @@ for f in README.md plugins/sdp/README.md; do
     || bad "(xi-b) $f: gate docs missing a --reviewer direction"
 done
 
-# (c) divergence manifest: per-file divergent-line count + every divergent line is a direction line
-python3 - <<'PY' && ok "(xi-c) core-tree divergence matches the manifest (direction-only; no new contradiction)" \
-                 || bad "(xi-c) core-tree divergence drifted from the manifest (see stderr)"
-import pathlib, difflib, re, sys
-EXPECT = {"SDP.md":1, "Stage1_interview.md":0, "Stage2_normalize.md":0, "Stage3_current_state.md":0,
-          "Stage4_design_plan.md":4, "Stage5_implement.md":1, "Stage6_test_plan.md":0,
-          "Stage7_test_exec.md":4, "Stage8_verification.md":0}
-tok = re.compile(r'codex|Codex|Claude|claude_review_gate|review_gate\.py|\bMCP\b|call the script|--reviewer')
-ok = True
-for f, exp in EXPECT.items():
-    a = (pathlib.Path("core")/f).read_text(encoding="utf-8").splitlines()
-    b = (pathlib.Path("plugins/sdp/core")/f).read_text(encoding="utf-8").splitlines()
-    diff = [l for l in difflib.unified_diff(a, b, lineterm="")
-            if l[:1] in "+-" and l[:3] not in ("---", "+++")]
-    root_side = [l[1:] for l in diff if l[0] == "-"]
-    if len(root_side) != exp:
-        sys.stderr.write(f"  {f}: {len(root_side)} divergent line(s); manifest expects {exp}\n"); ok = False
-    for l in diff:
-        c = l[1:]
-        if c.strip() and not tok.search(c):
-            sys.stderr.write(f"  {f}: NON-direction divergent line -> {c[:70]}\n"); ok = False
-sys.exit(0 if ok else 1)
-PY
+# (c) divergence manifest retired: core/ and plugins/sdp/core/ are now byte-identical
+#     (host-neutral, issue #3). (xiv) asserts the identity directly.
 
 # ---- (xiv) turn-conduct rule present in BOTH core trees --------------------
 # Issue #1: an agent can end a turn with a progress report while work remains.
@@ -468,6 +437,44 @@ done
   && grep -qF '~/.config/sdp/' COMMAND_MANUAL.ko.md; } \
   && ok "(xiii) COMMAND_MANUAL.ko.md mirrors the discovery semantics" \
   || bad "(xiii) COMMAND_MANUAL.ko.md missing the discovery semantics"
+
+# (xv) Issue #3 — the core is read by BOTH hosts (the Claude manifest ships
+# ./commands, the Codex manifest ships ./skills, and each host's adapter reads
+# core/*.md). A `--reviewer` pinned in a copy-pasteable gate command is therefore
+# inverted on the other host, and the cross-model gate collapses into self-review.
+diff -r core plugins/sdp/core >/dev/null 2>&1 \
+  && ok "(xv) core/ and plugins/sdp/core/ are identical (one shared, host-neutral core)" \
+  || bad "(xv) core/ and plugins/sdp/core/ diverged — a host-specific reviewer can hide in the copy"
+
+for f in core/Stage4_design_plan.md core/Stage5_implement.md core/Stage7_test_exec.md \
+         plugins/sdp/core/Stage4_design_plan.md plugins/sdp/core/Stage5_implement.md \
+         plugins/sdp/core/Stage7_test_exec.md; do
+  n=$(grep -cE '^[^>]*review_gate\.py[^|]*--reviewer (codex|claude)' "$f" || true)
+  [ "$n" = "0" ] \
+    && ok "(xv) $f: gate commands pin no --reviewer (host default decides)" \
+    || bad "(xv) $f: $n gate command(s) pin --reviewer — self-review on the opposite host"
+done
+
+# SDP.md keeps exactly one pinned example: the codex-side CLI fallback (--reviewer
+# claude). The Claude-side example must stay flag-free, since codex is already the CLI default.
+for f in core/SDP.md plugins/sdp/core/SDP.md; do
+  nc=$(grep -cF 'review_gate.py" --cwd "$PWD" --reviewer codex' "$f" || true)
+  na=$(grep -cF 'review_gate.py" --cwd "$PWD" --reviewer claude' "$f" || true)
+  { [ "$nc" = "0" ] && [ "$na" = "1" ]; } \
+    && ok "(xv) $f: Claude-side example is flag-free, codex-side fallback pins claude" \
+    || bad "(xv) $f: reviewer examples wrong (--reviewer codex=$nc, --reviewer claude=$na; want 0/1)"
+  grep -qF 'Never pin `--reviewer` into a copied gate command' "$f" \
+    && ok "(xv) $f: states the never-pin rule" \
+    || bad "(xv) $f: lost the never-pin rule"
+done
+
+# Every stage that prints a copy-pasteable gate block restates who reviews.
+for f in core/Stage4_design_plan.md core/Stage7_test_exec.md \
+         plugins/sdp/core/Stage4_design_plan.md plugins/sdp/core/Stage7_test_exec.md; do
+  grep -qF 'Reviewer = the model opposite the author' "$f" \
+    && ok "(xv) $f: gate block carries the opposite-model reviewer rule" \
+    || bad "(xv) $f: gate block missing the opposite-model reviewer rule"
+done
 
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

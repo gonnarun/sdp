@@ -20,7 +20,7 @@
 ### Docs govern code
 - Follow the plan's order and spec **exactly**.
 - Make no change absent from the plan.
-- If extra change is needed: **stop, edit the plan (or fix-plan) first, re-run `scripts/review_gate.py --reviewer codex`, and resume only after a fresh `ALLOW:`** (SDP.md "Inter-stage rules"). User approval alone does not authorize an off-plan change — the plan is re-gated. (If that re-gate returns `INFRA_ERROR` rather than a content BLOCK, apply the 3-state policy per SDP.md — attended may resume but MERGE/PUSH stays blocked until a clean `ALLOW:`.)
+- If extra change is needed: **stop, edit the plan (or fix-plan) first, re-run the review gate (`claude_review_gate` on the codex side, `scripts/review_gate.py` with no `--reviewer` on the Claude Code side), and resume only after a fresh `ALLOW:`** (SDP.md "Inter-stage rules"). User approval alone does not authorize an off-plan change — the plan is re-gated. (If that re-gate returns `INFRA_ERROR` rather than a content BLOCK, apply the 3-state policy per SDP.md — attended may resume but MERGE/PUSH stays blocked until a clean `ALLOW:`.)
 
 ### Library-API check
 - Before a new import / new API call / major-version-migration code, confirm the current signature via `mcp__context7__*` (see SDP.md "context7 MCP rule").

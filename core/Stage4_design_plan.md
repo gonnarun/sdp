@@ -55,10 +55,13 @@ For XL only, run the `general-purpose` verifiers in parallel over: feasibility, 
 The plan carries a **design section, inline by default**. **Promote** it to a standalone `design_{feature}.md` + **one early design gate** when impact = High **or** blast-radius exceeded — where "blast-radius exceeded" means any of: a new module/service, a cross-cut touching **> 10 files** (SDP work-size class L), or a large brownfield delta. When trivial, write a one-line `design trivial: {reason}` (logged) — no promotion.
 
 **Early design gate (only when promoted)**: run the gate on `design_{feature}.md` before writing the full plan, so a wrong design is caught early:
+
+> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+
 ```bash
 # $BASE_DIR and $DATE are recorded by sdp-anchor.sh in .sdp_runtime.env metadata; never source that file as shell code.
 DESIGN="$BASE_DIR/$DATE/design_{feature}.md"
-python3 scripts/review_gate.py --cwd "$PWD" --reviewer codex "Review the design at $DESIGN for architectural soundness, alternatives considered (ADRs), and high-impact/blast-radius risks. First line 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$DESIGN"
+python3 scripts/review_gate.py --cwd "$PWD" "Review the design at $DESIGN for architectural soundness, alternatives considered (ADRs), and high-impact/blast-radius risks. First line 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$DESIGN"
 ```
 Verdict handling mirrors the plan gate below, except `BLOCK:` → revise **`design_{feature}.md`** (the full plan isn't written yet) and re-review. On `ALLOW:`, proceed to author the full plan (which still gets its own plan gate).
 
@@ -131,7 +134,7 @@ In the fix loop, "the plan" below is the **latest fix-plan** (`fix_plan_{feature
 
 ## review gate (mandatory on plan / fix-plan completion)
 
-When the plan (or fix-plan) is done, print the summary block, then run the gate. **Do not embed gate logic — call the script.** All escalation/halt/resume/3-state logic lives in `scripts/review_gate.py` (see SDP.md "review gate").
+When the plan (or fix-plan) is done, print the summary block, then run the gate — the MCP tool `claude_review_gate` on the codex side, `scripts/review_gate.py` on the Claude Code side. **Do not embed gate logic — call the gate.** All escalation/halt/resume/3-state logic lives in `scripts/review_gate.py` (see SDP.md "review gate").
 
 ### Summary block (print before running)
 ```markdown
@@ -147,10 +150,13 @@ On ALLOW, start {implementation/reimplementation}.
 ```
 
 ### Run
-The gate's **arg1 is the review PROMPT** (the instruction codex acts on); **arg2 is the artifact path** (its content is read size-capped, wrapped as untrusted data for the reviewer, and its path keys the gate state/log). Do NOT pass `@<artifact>` as arg1 — `@file` makes the gate load the prompt FROM that file, so the plan would become the instruction and the review dimensions would never reach codex. Replace placeholders, then:
+The gate's **arg1 is the review PROMPT** (the instruction the reviewer acts on); **arg2 is the artifact path** (its content is read size-capped, wrapped as untrusted data for the reviewer, and its path keys the gate state/log). Do NOT pass `@<artifact>` as arg1 — `@file` makes the gate load the prompt FROM that file, so the plan would become the instruction and the review dimensions would never reach the reviewer. Replace placeholders, then:
+
+> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+
 ```bash
 PLAN="$BASE_DIR/$DATE/plan_{feature}.md"   # values read from anchor metadata, never sourced; fix loop: fix_plan_{feature}_N.md
-python3 scripts/review_gate.py --cwd "$PWD" --reviewer codex "Review the plan at $PLAN against the SDP Stage-4 review dimensions (REQ coverage; high-impact omissions; survey reflected; security/compliance & invariants per .sdp/project-rules.md; scope appropriateness; project DB/domain consistency; project anti-patterns; excess agent permissions; unapproved external transmission; trust/untrust mixing). First line must be 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$PLAN"
+python3 scripts/review_gate.py --cwd "$PWD" "Review the plan at $PLAN against the SDP Stage-4 review dimensions (REQ coverage; high-impact omissions; survey reflected; security/compliance & invariants per .sdp/project-rules.md; scope appropriateness; project DB/domain consistency; project anti-patterns; excess agent permissions; unapproved external transmission; trust/untrust mixing). First line must be 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$PLAN"
 ```
 The gate enforces a single wall budget of **550s** (`GATE_WALL_BUDGET`, ADR-008) across the Claude review + agy fallback — one monotonic deadline, not two independent caps. Per-provider caps default to 300s and are read from `gates.yaml` (`claude_timeout` / `agy_timeout`), never the environment; each provider receives `min(configured, remaining_budget − drain)`. The MCP `tool_timeout_sec` (660s) is the outer host ceiling (550 + drain < 660 < the Bash-tool `600000ms` hard max). A genuinely slow gate hits the wall budget and surfaces as `INFRA_ERROR` (3-state: attended may advance, MERGE/PUSH blocked; agy fallback / fail-close underneath).
 

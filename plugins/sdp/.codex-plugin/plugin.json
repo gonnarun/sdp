@@ -1,6 +1,6 @@
 {
   "name": "sdp",
-  "version": "0.1.0+codex.20260901062414",
+  "version": "0.1.0+codex.20260901062549",
   "description": "Shared staged-workflow plugin for Codex with an external Claude Code review gate and agy fallback.",
   "author": {
     "name": "run2u"

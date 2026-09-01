@@ -104,12 +104,12 @@ Authored by the Evaluator from the verdict; Stage 8 requires it as its first inp
 ## Fix-loop trigger
 - **PASS**: do not enter the loop; run the test-result gate. `ALLOW:` → Stage 8; `BLOCK:` → reinforce/re-review.
 - **FAIL**: auto-enter the fix loop. The "bug list" becomes the fix-plan input; fix-plan needs a review gate `ALLOW:`.
-- **CONDITIONAL**: do not enter the loop; run the test-result gate. codex `ALLOW:` → Stage 8; `BLOCK:` → reinforce missing verification or convert to FAIL.
+- **CONDITIONAL**: do not enter the loop; run the test-result gate. `ALLOW:` → Stage 8; `BLOCK:` → reinforce missing verification or convert to FAIL.
 - Loop details: SDP.md "Automatic fix loop".
 
 ## review-gate test-result review (mandatory on completion)
 
-When the result is **PASS or CONDITIONAL**, do not ask the user — review it with the gate. (A **FAIL** verdict auto-enters the fix loop instead — the fix-plan's own gate covers it — so the test-result gate is not run on FAIL.) **Do not embed gate logic — call the script.**
+When the result is **PASS or CONDITIONAL**, do not ask the user — review it with the gate. (A **FAIL** verdict auto-enters the fix loop instead — the fix-plan's own gate covers it — so the test-result gate is not run on FAIL.) Run the MCP tool `claude_review_gate` on the codex side, `scripts/review_gate.py` on the Claude Code side. **Do not embed gate logic — call the gate.**
 
 ### Summary block (print before running)
 ```markdown
@@ -126,10 +126,13 @@ On ALLOW, proceed to Stage 8.
 ```
 
 ### Run
-arg1 is the review PROMPT, arg2 is the artifact path. Do NOT pass `@<artifact>` as arg1 (`@file` loads the prompt FROM the file, so the result would become the instruction and the dimensions never reach codex).
+arg1 is the review PROMPT, arg2 is the artifact path. Do NOT pass `@<artifact>` as arg1 (`@file` loads the prompt FROM the file, so the result would become the instruction and the dimensions never reach the reviewer).
+
+> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+
 ```bash
 RESULT="$BASE_DIR/$DATE/testresult_{feature}.md"   # values read from anchor metadata, never sourced; fix loop: testresult_{feature}_N.md
-python3 scripts/review_gate.py --cwd "$PWD" --reviewer codex "Review the test result at $RESULT against the SDP Stage-7 review dimensions (all test-plan cases + REQ reflected, except Must REQs formally waived in Stage 6 §9; CI results stated; unit+integration results; risk_gated (e2e/contract) results present when Impact=High or blast-radius exceeded; security regression, permission, project repeated-mistake, invariants per .sdp/project-rules.md; bridge-omission regression; verdict matches Evaluator criteria; ready for Stage 8). First line must be 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$RESULT"
+python3 scripts/review_gate.py --cwd "$PWD" "Review the test result at $RESULT against the SDP Stage-7 review dimensions (all test-plan cases + REQ reflected, except Must REQs formally waived in Stage 6 §9; CI results stated; unit+integration results; risk_gated (e2e/contract) results present when Impact=High or blast-radius exceeded; security regression, permission, project repeated-mistake, invariants per .sdp/project-rules.md; bridge-omission regression; verdict matches Evaluator criteria; ready for Stage 8). First line must be 'ALLOW: <summary>' or 'BLOCK: <reason>', no preamble. Every finding MUST comply with the 'BLOCK output contract' subsection of this stage document: all six fields (WHERE, WHY, FIX, VERIFY, SEVERITY, SCOPE), SCOPE being exactly one of closeable-in-this-dispatch or must-be-recorded-instead, any field you cannot supply labelled exactly 'INCOMPLETE - <field> not supplied because <reason>', and the verdict closing with CHECKED-AND-CLEAN and IF-ONLY-ADVISORY." "$RESULT"
 ```
 The gate enforces a single **550s** wall budget (`GATE_WALL_BUDGET`, ADR-008) across the Claude review + agy fallback; per-provider caps default to 300s and are read from `gates.yaml` (`claude_timeout` / `agy_timeout`), never the environment. The MCP `tool_timeout_sec` (660s) is the outer host ceiling (550 < 660 < the Bash-tool `600000ms` hard max).
 

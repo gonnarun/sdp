@@ -150,7 +150,7 @@ Recommended action: {manual intervention}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-> The review gate is an external, cross-model gate: for Claude-authored work the primary reviewer is **codex** (the opposite model, via `scripts/review_gate.py`); agy is used only on codex infrastructure failure, and a clean content `BLOCK:` never falls back. It enforces its own halt independently: cumulative BLOCK escalates to team review at `${cadence.escalate_from}` (default 6) and hard-halts at `${halt.max_block}` (default 13). The 12-iteration loop cap and the gate halt are separate limits; whichever trips first stops the loop.
+> The review gate is an external, cross-model gate: the primary reviewer is always the **opposite** model of the author — codex reviews Claude-authored work, Claude Code reviews codex-authored work. agy is used only on the primary reviewer's infrastructure failure, and a clean content `BLOCK:` never falls back. It enforces its own halt independently: cumulative BLOCK escalates to team review at `${cadence.escalate_from}` (default 6) and hard-halts at `${halt.max_block}` (default 13). The 12-iteration loop cap and the gate halt are separate limits; whichever trips first stops the loop.
 
 ### Fix-plan header (mandatory sections)
 
@@ -214,7 +214,7 @@ The summary is a **required-reference index, not a replacement** for the origina
 
 ## review gate
 
-At a review gate, do not send a user-approval request — review the artifact with the inverse (cross-model) gate: the primary reviewer is the **opposite** model of the author. In **codex** the primary reviewer is **Claude Code** (the MCP tool `claude_review_gate`); in **Claude Code** the primary reviewer is **codex** (`review_gate.py --reviewer codex`, the CLI default). **agy** is the fallback for both directions, only on the primary's infrastructure failure — never on a content `BLOCK:`. On the codex side prefer the MCP tool `claude_review_gate`; on the Claude Code side run `scripts/review_gate.py --reviewer codex`.
+At a review gate, do not send a user-approval request — review the artifact with the inverse (cross-model) gate: the primary reviewer is the **opposite** model of the author. In **codex** the primary reviewer is **Claude Code** (the MCP tool `claude_review_gate`); in **Claude Code** the primary reviewer is **codex** (`review_gate.py`'s CLI default — no flag needed). **agy** is the fallback for both directions, only on the primary's infrastructure failure — never on a content `BLOCK:`. On the codex side prefer the MCP tool `claude_review_gate`; on the Claude Code side run `scripts/review_gate.py` **without** `--reviewer` — its CLI default (`codex`) is already the opposite of you. **Never pin `--reviewer` into a copied gate command**: this core is shared by both hosts, so a pinned value is inverted on the other one and the gate degrades into self-review.
 
 ### Every gate invocation carries the BLOCK output contract ★
 
@@ -239,11 +239,11 @@ and rounds get spent discovering that distinction one objection at a time.
 
 MCP arguments: `cwd` (repository root), `prompt` (review prompt), `artifact_path` (plan, fix-plan, design, or test-result path); optional `reviewer` (`codex`|`claude`) defaults to `claude` — the opposite of the codex caller.
 
-CLI fallback (pick `--reviewer` = the **opposite** model of the author):
+CLI fallback (the reviewer must be the **opposite** model of the author — omit the flag on Claude Code, pin `claude` only on the codex side):
 
 ```bash
-# Claude Code side — review Claude's work with codex (the CLI default):
-python3 "$SDP_SCRIPTS/review_gate.py" --cwd "$PWD" --reviewer codex "<review prompt>" "<artifact-path>"
+# Claude Code side — review Claude's work with codex (the CLI default; do not pass --reviewer):
+python3 "$SDP_SCRIPTS/review_gate.py" --cwd "$PWD" "<review prompt>" "<artifact-path>"
 # codex side, if the MCP tool is unavailable — review codex's work with Claude:
 python3 "$SDP_SCRIPTS/review_gate.py" --cwd "$PWD" --reviewer claude "<review prompt>" "<artifact-path>"
 ```
