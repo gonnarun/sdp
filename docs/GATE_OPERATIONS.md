@@ -170,7 +170,17 @@ sanctioned without these would turn an accident into a supported bypass:
 | a child that already carries gate state | children are new work, not a way to move a counter |
 | no rationale | the log has to say why the scope could not converge |
 | fewer than two distinct BLOCK reasons in the log | one reason repeated is an unfixed finding; a narrower artifact does not cure it |
+| a child byte-identical to the parent or to a sibling | the literal names-only split |
 | chain depth past `halt.split_depth_cap` (default 2) | uncapped, the path becomes "split until it passes" |
+
+Child freshness is decided **inside each child's own lock**, and "fresh" means the log holds no live
+record — not that its counter reads zero. An `ALLOW`, a team marker, a stall or a seed written by a
+different parent all pass a counter check and are all state a split must not adopt. The one tolerated
+residue is a retracted seed (`SPLIT_CHILD_OF` followed by `SPLIT_CHILD_ABANDONED`), which is what a
+split that failed mid-flight leaves behind, so the same split can be retried with the same artifacts.
+
+**What is not checked:** that the children are a narrower *scope*. Byte-identical copies are refused;
+a child differing by one character is not. The ceremony is what stands behind the rest — see NC-33.
 
 Write order is **children first, parent last**: a half-finished split leaves the parent halted
 and recoverable rather than sealed with nowhere to go. If the audit row cannot be written the

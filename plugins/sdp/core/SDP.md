@@ -291,7 +291,8 @@ On the codex side the prepare step is the MCP tool `sdp_prepare_split`; recordin
 What a split is and is not:
 - The parent is **closed as `SPLIT`** — reviewing it afterwards returns `BLOCK: artifact was split; gate the children`. Its own BLOCK history is **kept**, so the decision stays auditable.
 - Each child starts its **own counter at 0**, with `SPLIT_CHILD_OF parent=<key> parent_round=<n> depth=<d>` seeded into its log. This is the point: the narrower artifact is a new piece of work, not a continuation.
-- It is **not a reset and not a bypass**. It is refused unless the artifact is halted, at least two distinct child artifacts exist on disk, none of them is the parent, a rationale is given, and the log shows **two or more distinct BLOCK reasons** — one reason repeated is an unfixed finding, which a narrower artifact does not cure.
+- It is refused unless the artifact is halted, at least two child artifacts exist on disk, none of them is the parent, **none already carries any gate state** (an ALLOWed file or one already seeded by another split is not a fresh child), none is a **byte-identical copy** of the parent or of a sibling, a rationale is given, and the log shows **two or more distinct BLOCK reasons** — one reason repeated is an unfixed finding, which a narrower artifact does not cure.
+- **What the engine does not check is the scope itself.** Content *equality* is refused; a child that differs by one character passes. Narrowing is the human's claim, backed by the recording ceremony, not something the gate verifies (`KNOWN_GAPS` NC-33).
 - The chain is capped by `${halt.split_depth_cap}` (default 2). Splitting has always reset the counter as a side effect, because state is keyed by artifact path; the cap is what stops "split until it passes".
 
 ### INFRA flag (REQ-M11)

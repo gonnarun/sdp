@@ -1255,7 +1255,8 @@ def _read_log_counts(log: Path) -> int:
             count += 1
         elif head in ("ALLOW", "INFRA_ERROR", "TEAM_REVIEW", "TEAM_CARRY",
                       "ESCALATION_STALL", "MARKER_AUDIT_FAILED",
-                      "SPLIT", "SPLIT_CHILD_OF", "SPLIT_AUDIT_FAILED",
+                      "SPLIT", "SPLIT_CHILD_OF", "SPLIT_CHILD_ABANDONED",
+                      "SPLIT_AUDIT_FAILED",
                       SPLIT_RATIONALE_PREFIX.strip(), REASON_PREFIX.strip()):
             # D-4: BOTH new heads are counter-neutral HERE as well as in
             # _parse_log. The two tables are independent functions with
@@ -1306,6 +1307,9 @@ class _LogState:
     # looping on one finding" (1) -- derived from the log, never from the requester's
     # own claim, so it cannot be talked up.
     distinct_reasons: int = 0
+    # True while a SPLIT_CHILD_OF stands un-retracted: this artifact is a child of a
+    # split. Cleared by SPLIT_CHILD_ABANDONED (codex review F3).
+    split_pending: bool = False
 
 
 def _parse_log(log: Path) -> _LogState:
@@ -1327,6 +1331,7 @@ def _parse_log(log: Path) -> _LogState:
     blocks_since_marker = 0
     split_closed = False
     split_depth = 0
+    split_pending = False
     reason_hashes: set[str] = set()
     for raw in text.splitlines():
         line = raw.strip()
@@ -1393,6 +1398,15 @@ def _parse_log(log: Path) -> _LogState:
             # is INERT, so the parent is reviewable again rather than silently sealed
             # by a split no audit row backs.
             split_closed = False
+        elif head == "SPLIT_CHILD_ABANDONED":
+            # Codex review F3. A split that failed AFTER seeding this child leaves a
+            # SPLIT_CHILD_OF asserting a relationship the parent never committed.
+            # The compensating append retracts it: the linkage and the depth it
+            # carried are gone, and the freshness rule below re-admits the child, so
+            # the same children can be retried. Without this, a mid-flight failure
+            # made the split unrepeatable with the artifacts it was for.
+            split_depth = 0
+            split_pending = False
         elif head == "SPLIT_CHILD_OF":
             # Seeded into a CHILD's fresh log by record-split. It carries the chain
             # depth, which is what `halt.split_depth_cap` is measured against; the
@@ -1406,6 +1420,7 @@ def _parse_log(log: Path) -> _LogState:
                         # Unparsable depth is treated as the cap-exceeding case by
                         # _split_checks, never as depth 0 (fail-closed).
                         split_depth = max(split_depth, sys.maxsize)
+            split_pending = True
         elif head == SPLIT_RATIONALE_PREFIX.strip():
             # Human-authored prose, persisted and INERT -- same contract as REASON.
             continue
@@ -1430,7 +1445,7 @@ def _parse_log(log: Path) -> _LogState:
             blocks_since_marker += 1
     return _LogState(count, hashes[-2:], last_marker, last_block_ts, pivot_count,
                      stall_run, stall_trailing, blocks_since_marker,
-                     split_closed, split_depth, len(reason_hashes))
+                     split_closed, split_depth, len(reason_hashes), split_pending)
 
 
 def _ts_to_epoch(ts: str) -> float:
@@ -2733,6 +2748,39 @@ def _resolve_children(root: Path, raw_children) -> tuple[list[Path], str]:
     return resolved, ""
 
 
+def _content_distinct(artifact: Path, children: list[Path]) -> tuple[bool, str]:
+    """Refuse the literal names-only split (codex review F4).
+
+    This is the ONE part of "the scope really was narrowed" an engine can decide:
+    a child that is a byte-for-byte copy of the parent, or of a sibling, is the same
+    artifact under another path. It is a floor, not the claim -- a child that differs
+    by one character passes, so the honest statement (README, GATE_OPERATIONS, NC-33)
+    is that content EQUALITY is refused and semantic narrowing is not verified; the
+    human ceremony is what stands behind the rest.
+    """
+    import hashlib
+
+    def digest(path: Path) -> str | None:
+        try:
+            with open(path, "rb") as handle:
+                return hashlib.sha256(handle.read(DEFAULT_MAX_ARTIFACT_BYTES + 1)).hexdigest()
+        except OSError:
+            return None   # unreadable is refused by (2)'s existence check, not here
+
+    parent = digest(artifact)
+    seen: dict[str, Path] = {}
+    for child in children:
+        d = digest(child)
+        if d is None:
+            continue
+        if parent is not None and d == parent:
+            return False, f"{child.name} is byte-identical to the parent"
+        if d in seen:
+            return False, f"{child.name} is byte-identical to {seen[d].name}"
+        seen[d] = child
+    return True, ""
+
+
 def _split_checks(
     artifact: Path,
     children: list[Path],
@@ -2755,6 +2803,7 @@ def _split_checks(
     """
     flat = " ".join((rationale or "").split())
     depth = state.split_depth
+    content_ok, content_why = _content_distinct(artifact, children) if not child_error else (True, "")
     return [
         (halted, "(0) the artifact is halted (split is a halt-recovery path, not a shortcut)"),
         (not state.split_closed, "(1) the artifact has not already been split"),
@@ -2785,6 +2834,11 @@ def _split_checks(
             depth + 1 <= depth_cap,
             f"(7) the resulting chain depth {depth + 1} is within halt.split_depth_cap "
             f"{depth_cap}",
+        ),
+        (
+            content_ok,
+            f"(8) no child is a byte-identical copy of the parent or of another child"
+            + ("" if content_ok else f" -- {content_why}"),
         ),
     ]
 
@@ -2937,36 +2991,55 @@ def record_split(
         stamp = _now_z()
         # ---- children first (see the docstring's write-order note) -----------
         seeded: list[str] = []
+        seeded_paths: list[tuple[str, dict[str, Path]]] = []
         for child in resolved:
             child_key = _artifact_key(child)
             child_paths = _state_paths(root, child_key)
-            child_state = _parse_log(child_paths["log"])
-            if child_state.count or child_state.split_closed:
-                return _refuse(
-                    f"child {child.name} already carries gate state (round "
-                    f"{child_state.count}); split children must be fresh artifacts; "
-                    "nothing was written"
-                )
-            with _state_lock(child_paths["lock"], time.monotonic() + 30):
-                if not _APPEND_LINE(
-                    child_paths["log"],
-                    f"SPLIT_CHILD_OF {stamp} parent={key} parent_round={prior} depth={depth}",
-                ):
-                    raise InfraError(f"SPLIT_CHILD_OF append failed for {child.name}")
-                for line in _split_rationale_lines(rationale):
-                    if not _APPEND_LINE(child_paths["log"], line):
-                        raise InfraError(f"SPLIT_RATIONALE append failed for {child.name}")
+            # Codex review F1/F2. The freshness decision is made INSIDE the child's
+            # own lock, and it is "the log holds no live record", not "the counter
+            # reads zero": an ALLOWed child, a child already seeded by ANOTHER parent,
+            # or one carrying a marker are all state a split must not adopt, and none
+            # of them moves `count`. A pre-lock read decided nothing here, so it is
+            # gone rather than kept as an optimization.
+            try:
+                with _state_lock(child_paths["lock"], time.monotonic() + 30):
+                    live = _live_child_records(child_paths["log"])
+                    if live:
+                        _abandon_seeds(seeded_paths, stamp)
+                        return _refuse(
+                            f"child {child.name} already carries gate state ({live}); "
+                            "split children must be fresh artifacts; nothing was written"
+                        )
+                    if not _APPEND_LINE(
+                        child_paths["log"],
+                        f"SPLIT_CHILD_OF {stamp} parent={key} parent_round={prior} depth={depth}",
+                    ):
+                        raise InfraError(f"SPLIT_CHILD_OF append failed for {child.name}")
+                    for line in _split_rationale_lines(rationale):
+                        if not _APPEND_LINE(child_paths["log"], line):
+                            raise InfraError(f"SPLIT_RATIONALE append failed for {child.name}")
+            except InfraError:
+                # Codex review F3: never leave a seed standing for a split that did
+                # not commit. Retract what was already written, then re-raise.
+                _abandon_seeds(seeded_paths, stamp)
+                raise
             seeded.append(child_key)
+            seeded_paths.append((child_key, child_paths))
 
         # ---- then seal the parent -------------------------------------------
-        for line in _split_rationale_lines(rationale):
-            if not _APPEND_LINE(paths["log"], line):
-                raise InfraError("SPLIT_RATIONALE append failed")
-        split_line = (
-            f"SPLIT {stamp} depth={depth} children={len(resolved)} keys={','.join(seeded)}"
-        )
-        if not _APPEND_LINE(paths["log"], split_line):
-            raise InfraError("SPLIT append failed")
+        try:
+            for line in _split_rationale_lines(rationale):
+                if not _APPEND_LINE(paths["log"], line):
+                    raise InfraError("SPLIT_RATIONALE append failed")
+            split_line = (
+                f"SPLIT {stamp} depth={depth} children={len(resolved)} keys={','.join(seeded)}"
+            )
+            if not _APPEND_LINE(paths["log"], split_line):
+                raise InfraError("SPLIT append failed")
+        except InfraError:
+            # The parent never closed, so the children must not keep claiming it did.
+            _abandon_seeds(seeded_paths, stamp)
+            raise
 
         result = {
             "verdict": "SPLIT", "provider": "human",
@@ -2985,8 +3058,10 @@ def record_split(
         # ---- the audit row was NOT written -- compensate, as record_marker does
         if _APPEND_LINE(paths["log"], f"SPLIT_AUDIT_FAILED {_now_z()}"):
             # The SPLIT is now INERT: the parent is halted-but-reviewable again
-            # rather than sealed by a split nothing audited. The child seeds stay,
-            # and are harmless -- a seeded child log carries no counter.
+            # rather than sealed by a split nothing audited. Codex review F3: the
+            # child seeds are retracted with it, so the same split can be retried
+            # with the same artifacts instead of being permanently unrepeatable.
+            _abandon_seeds(seeded_paths, _now_z())
             if not _write_flag(
                 paths["infra_flag"], "split audit row not written; split invalidated\n"
             ):
@@ -3009,6 +3084,56 @@ def record_split(
         if not flag_ok:
             raise failure from InfraError("infra_flag write also failed")
         raise failure
+
+
+_SPLIT_SEED_HEADS = frozenset({"SPLIT_CHILD_OF", "SPLIT_CHILD_ABANDONED",
+                               SPLIT_RATIONALE_PREFIX.strip()})
+
+
+def _live_child_records(log: Path) -> str:
+    """Describe the gate state a candidate child already carries, or "" if none.
+
+    Codex review F2. "Fresh" is not `count == 0`: an ALLOW, a team marker, an
+    ESCALATION_STALL and a seed written by a DIFFERENT parent are all records a
+    split must not adopt, and not one of them moves the counter. So the rule is
+    inverted -- the log must hold no live record at all. The only tolerated content
+    is a retracted seed (SPLIT_CHILD_OF ... SPLIT_CHILD_ABANDONED) plus its inert
+    rationale lines, which is exactly the residue of a split that failed mid-flight
+    and must be retryable with the same artifacts.
+    """
+    if not log.exists():
+        return ""
+    try:
+        text = log.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InfraError(f"gate log unreadable: {exc}") from exc
+    heads: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        head = line.split(" ", 1)[0]
+        if head not in _SPLIT_SEED_HEADS:
+            heads.append(head)
+    if heads:
+        return ",".join(sorted(set(heads)))
+    # Only seed residue: live if the last seed was never retracted.
+    return "SPLIT_CHILD_OF" if _parse_log(log).split_pending else ""
+
+
+def _abandon_seeds(seeded: list[tuple[str, dict[str, "Path"]]], stamp: str) -> None:
+    """Retract every child seed written by a split that did not commit (F3).
+
+    Best-effort BY DESIGN: this runs on a failure path, and raising here would
+    replace one honest error with a less informative one. A seed that cannot be
+    retracted stays visible as a live SPLIT_CHILD_OF, which is the FAIL-CLOSED
+    direction -- the child is refused as a split target until a human looks.
+    """
+    import time
+    for _key, child_paths in seeded:
+        with contextlib.suppress(Exception):
+            with _state_lock(child_paths["lock"], time.monotonic() + 10):
+                _APPEND_LINE(child_paths["log"], f"SPLIT_CHILD_ABANDONED {stamp}")
 
 
 def _split_rationale_lines(text: str) -> list[str]:

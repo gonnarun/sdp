@@ -342,5 +342,69 @@ printf '%s' "$out" | grep -q 'artifact was split' \
   && bad "(I3) the parent stayed sealed by a split nothing audited" \
   || ok "(I3) the invalidated split leaves the parent halted, not sealed"
 
+# ---------------------------------------------------------------------------
+# J. WHAT THE CODEX REVIEW OF THIS CHANGE FOUND (F1-F4)
+#    Freshness is decided under the child's own lock and over the WHOLE log, a
+#    split that does not commit retracts its seeds, and a byte-identical child is
+#    refused.
+# ---------------------------------------------------------------------------
+J="$TMP/fresh"; mkdir -p "$J/.sdp"; printf 'plan\n' > "$J/plan.md"
+printf 'child a\n' > "$J/a.md"; printf 'child b\n' > "$J/b.md"; gates "$J" 2 2
+drive "$J" "$J/plan.md" 2 fresh
+H --cwd "$J" --reviewer claude review "$J/plan.md" >/dev/null 2>&1
+
+# (F2) an ALLOWed child carries state that never moves the counter.
+set_claude_verdict "ALLOW: fine"
+H --cwd "$J" --reviewer claude review "$J/a.md" >/dev/null 2>&1
+# The dirty child is listed SECOND on purpose: the first child is seeded, then the
+# refusal lands, so this also proves the retraction of an already-written seed.
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$J" record-split "$J/plan.md" --split-child "$J/b.md" --split-child "$J/a.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'already carries gate state'; } \
+  && ok "(J1) a child that already passed a gate is refused (count==0 is not fresh)" \
+  || bad "(J1) an ALLOWed child was adopted as a split child"
+JLOG="$(logpath "$J" "$J/plan.md")"
+grep -q '^SPLIT ' "$JLOG" && bad "(J2) the parent closed despite a refused child" \
+  || ok "(J2) a refused child leaves the parent open"
+grep -q '^SPLIT_CHILD_ABANDONED' "$(logpath "$J" "$J/b.md")" 2>/dev/null \
+  && ok "(J3) seeds written before the refusal are retracted" \
+  || bad "(J3) a seed survived a refused split"
+
+# (F4) byte-identical children are the names-only split the refusals exist for.
+K="$TMP/copy"; mkdir -p "$K/.sdp"; printf 'the whole plan\n' > "$K/plan.md"
+cp "$K/plan.md" "$K/copy1.md"; cp "$K/plan.md" "$K/copy2.md"; gates "$K" 2 2
+set_claude_verdict "BLOCK: seed"
+drive "$K" "$K/plan.md" 2 copy
+H --cwd "$K" --reviewer claude review "$K/plan.md" >/dev/null 2>&1
+out="$(H --cwd "$K" prepare-split "$K/plan.md" --split-child "$K/copy1.md" \
+        --split-child "$K/copy2.md" --split-rationale "not really a split" 2>&1)"
+printf '%s' "$out" | grep -q 'FAIL (8) no child is a byte-identical copy' \
+  && ok "(J4) a child that is a copy of the parent is refused" \
+  || bad "(J4) copies of the parent accepted as children"
+printf 'genuinely narrower\n' > "$K/copy1.md"
+out="$(H --cwd "$K" prepare-split "$K/plan.md" --split-child "$K/copy1.md" \
+        --split-child "$K/copy2.md" --split-rationale "still a copy" 2>&1)"
+printf '%s' "$out" | grep -q 'FAIL (8)' \
+  && ok "(J5) one copy of the parent among the children is still refused" \
+  || bad "(J5) a parent copy slipped through as a sibling"
+
+# (F3) a split invalidated by an unauditable write must be RETRYABLE with the
+#      same artifacts: the seeds are retracted, so the children are fresh again.
+rmdir "$A/.private/sdp-artifacts/gate-audit.ndjson" 2>/dev/null
+ACHILD="$(logpath "$A" "$A/a.md")"
+grep -q '^SPLIT_CHILD_ABANDONED' "$ACHILD" \
+  && ok "(J6) the invalidated split retracted its child seeds" \
+  || bad "(J6) child seeds survived an invalidated split"
+out="$(printf 'record split for plan into 2 at round 2\n' | \
+        RS --cwd "$A" record-split "$A/plan.md" --split-child "$A/a.md" --split-child "$A/b.md" \
+           --split-rationale "two concerns" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^SPLIT: plan.md closed'; } \
+  && ok "(J7) the same split can be retried after the failure is cleared" \
+  || bad "(J7) an invalidated split left the artifacts permanently unsplittable"
+grep -qE '^SPLIT_CHILD_OF .* depth=1' "$ACHILD" \
+  && ok "(J8) the retry seeds a live link at the right depth" \
+  || bad "(J8) retry did not seed the child"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]
