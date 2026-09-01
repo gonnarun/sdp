@@ -8,7 +8,8 @@
 #   1 config discoverable  : project override OR user-global fallback (REQ-U-05)
 #   2 anchor resolves      : sdp-anchor.sh writes runtime env + creates/gitignores
 #                            .private (REQ-P-03 / REQ-U-07) — idempotent, safe to re-run
-#   3 no forced_ext weaken : sdp_cfg_check_no_weakening passes (base safety keys not weakened)
+#   3 forced_ext claim ok  : sdp_cfg_check_no_weakening passes (no base safety key carries a
+#                            non-truthy claim; no enforcement consumer reads their values -- NC-31)
 #   4 gate strength intact : (a) BASELINE escalate_from <= 6 AND marker_span <= 1 AND
 #                            max_block <= 13 — a project may always make the gate
 #                            EARLIER/STRICTER. Relaxing past baseline is allowed only
@@ -108,9 +109,9 @@ check_project() {
     bad "anchor did not resolve cleanly (REQ-P-03/U-07)"
   fi
 
-  # 3 no forced_ext weakening
+  # 3 forced_ext base-key claims are truthy
   if [ -n "$defaults" ] && command -v sdp_cfg_check_no_weakening >/dev/null 2>&1; then
-    if sdp_cfg_check_no_weakening "$defaults" >/dev/null 2>&1; then ok "no forced_ext weakening"; else bad "forced_ext weakens base safety keys"; fi
+    if sdp_cfg_check_no_weakening "$defaults" >/dev/null 2>&1; then ok "no non-truthy forced_ext base-key claim"; else bad "forced_ext gives a base safety key a non-truthy claim"; fi
   fi
 
   # 4 gate-strength thresholds not weakened (AC-12) — only if the project overrides them

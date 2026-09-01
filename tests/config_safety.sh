@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # config_safety.sh — unit test for sdp_cfg_check_no_weakening (REQ-U-04 no-weakening guard).
-# A project's forced_ext must only STRENGTHEN base safety keys; every YAML-false spelling and inline-flow
-# evasion must be caught (Fail-Close).
+# A project's forced_ext may carry a base safety key only as a truthy CLAIM: every YAML-false
+# spelling and inline-flow evasion must be caught (Fail-Close). The check validates the claim,
+# not behaviour -- this validator is the only code recognising the five key names, and no
+# enforcement consumer reads their values (KNOWN_GAPS NC-31).
 set -u
 SDP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0; FAIL=0
@@ -11,12 +13,12 @@ TMP="$(mktemp -d -t sdp_cfg_test.XXXXXX)"; trap 'rm -rf "$TMP"' EXIT
 # shellcheck source=/dev/null
 . "$SDP_ROOT/scripts/lib/sdp-config.sh"
 
-chk() { sdp_cfg_check_no_weakening "$1" >/dev/null 2>&1; }   # rc 1 = weakening blocked, 0 = ok
+chk() { sdp_cfg_check_no_weakening "$1" >/dev/null 2>&1; }   # rc 1 = non-truthy claim blocked, 0 = ok
 
-# each YAML-false spelling weakening a base key must be blocked
+# each YAML-false spelling of a base key claim must be blocked
 for spell in false False FALSE no No off n 0; do
   printf 'forced_ext:\n  hardcoded_secret_block: %s\n' "$spell" > "$TMP/w.yaml"
-  chk "$TMP/w.yaml" && bad "weakening spelling '$spell' NOT blocked" || ok "weakening '$spell' blocked"
+  chk "$TMP/w.yaml" && bad "falsy spelling '$spell' NOT blocked" || ok "falsy claim '$spell' blocked"
 done
 
 # non-empty inline-flow forced_ext (evades the line reader) must be rejected
@@ -35,7 +37,7 @@ chk "$TMP/null.yaml" && bad "null value NOT rejected" || ok "null value rejected
 printf 'forced_ext: {\n  hardcoded_secret_block: false\n}\n' > "$TMP/mlopen.yaml"
 chk "$TMP/mlopen.yaml" && bad "multi-line flow-open NOT rejected" || ok "multi-line flow-open rejected"
 printf 'forced_ext:\n\thardcoded_secret_block: false\n' > "$TMP/tab.yaml"
-chk "$TMP/tab.yaml" && bad "tab-indented weakening NOT rejected" || ok "tab-indented weakening rejected"
+chk "$TMP/tab.yaml" && bad "tab-indented falsy claim NOT rejected" || ok "tab-indented falsy claim rejected"
 printf '"forced_ext":\n  hardcoded_secret_block: false\n' > "$TMP/qparent.yaml"
 chk "$TMP/qparent.yaml" && bad "quoted forced_ext key NOT rejected" || ok "quoted forced_ext key rejected"
 # a SECOND forced_ext block must reopen (not slip past the dedent)
@@ -46,16 +48,16 @@ printf 'forced_ext:\n  redact_secrets\n' > "$TMP/colonless.yaml"
 chk "$TMP/colonless.yaml" && bad "colonless base key NOT rejected" || ok "colonless base key rejected"
 # a FLAT dotted key (forced_ext.<base>: falsy) resolves by literal name in sdp_cfg_get -> must be blocked too
 printf 'forced_ext.redact_secrets: false\n' > "$TMP/dotted.yaml"
-chk "$TMP/dotted.yaml" && bad "flat dotted-key weakening NOT rejected" || ok "flat dotted-key weakening rejected"
+chk "$TMP/dotted.yaml" && bad "flat dotted-key falsy claim NOT rejected" || ok "flat dotted-key falsy claim rejected"
 printf 'forced_ext.hardcoded_secret_block: true\n' > "$TMP/dottedok.yaml"
-chk "$TMP/dottedok.yaml" && ok "flat dotted-key strengthening allowed" || bad "flat dotted-key true wrongly blocked"
+chk "$TMP/dottedok.yaml" && ok "flat dotted-key truthy claim allowed" || bad "flat dotted-key true wrongly blocked"
 # must NOT false-positive on a CRLF file with a truthy key
 printf 'forced_ext:\r\n  hardcoded_secret_block: true\r\n' > "$TMP/crlf.yaml"
 chk "$TMP/crlf.yaml" && ok "CRLF truthy key allowed (no false positive)" || bad "CRLF truthy key wrongly blocked"
 
-# strengthening (true) is allowed
+# a truthy claim (true) is allowed -- the check validates the claim, not behaviour (NC-31)
 printf 'forced_ext:\n  hardcoded_secret_block: true\n' > "$TMP/s.yaml"
-chk "$TMP/s.yaml" && ok "strengthening (true) allowed" || bad "strengthening wrongly blocked"
+chk "$TMP/s.yaml" && ok "truthy claim (true) allowed" || bad "truthy claim wrongly blocked"
 
 # empty inline-flow {} is harmless and allowed
 printf 'forced_ext: {}\n' > "$TMP/empty.yaml"

@@ -54,4 +54,4 @@ Copy the shape below and fill with the project's real conventions. Values that t
 
 ## forced_ext (domain safety extensions)
 
-`.sdp/defaults.yaml: forced_ext` may **strengthen** base safety keys (extend-only; may not weaken). Put domain-mandated hard rules there when they must be machine-enforced rather than prose (e.g. a required test marker, a prod-DSN guard). This repo's `forced_ext` is empty.
+`.sdp/defaults.yaml: forced_ext` may carry a base safety key only as a **truthy claim** — the loader refuses every other spelling — but that validator is the only code recognising those keys and no enforcement consumer acts on their values, so it guards the claim, not behaviour (KNOWN_GAPS NC-31). Record domain-mandated hard rules here as the declared policy (e.g. a required test marker, a prod-DSN guard); the enforcement itself has to live in the project's own tests or gates. This repo's `forced_ext` is empty.

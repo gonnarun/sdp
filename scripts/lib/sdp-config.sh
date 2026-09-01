@@ -2,7 +2,14 @@
 # sdp-config.sh — minimal, dependency-free YAML reader for SDP config.
 # POSIX awk only (NFR-01). Handles scalar keys, arbitrary indentation-based
 # nesting, and simple `[a, b]` inline lists. NOT a general YAML parser — only
-# the subset SDP config uses. Full 2-layer merge lives in sdp_cfg_merge().
+# the subset SDP config uses. There is NO merge layer and no sdp_cfg_merge():
+# discovery (config_discovery.py) selects exactly ONE file and every key is read from
+# that file alone. Candidates are checked in precedence order, MISSING ones are
+# skipped, and the FIRST SAFELY READABLE REGULAR FILE is selected; a key absent
+# there falls back to a built-in default, never to a lower-precedence file. An
+# unsafe or unreadable candidate ABORTS discovery immediately -- it is never passed
+# over in favour of a lower-precedence file.
+# REQ-U-04's "2-layer merge" was never built; see KNOWN_GAPS NC-31.
 #
 # This reader is written to the SAME semantics as review_gate.py's
 # _read_gates_yaml (indent-stack nesting, quote-aware comment stripping,
@@ -85,15 +92,20 @@ sdp_cfg_base_dir() {
 }
 
 # sdp_cfg_check_no_weakening DEFAULTS_FILE
-# Fail (exit 1) if the project's forced_ext turns a base safety key OFF.
-# Base safety keys must only strengthen (true) — never be set false. (REQ-U-04)
+# Fail (exit 1) if the selected file's forced_ext gives a base safety key anything
+# but a truthy literal. This validates the CLAIM, not the behaviour: this validator is
+# the only code that recognises these five names, and no ENFORCEMENT consumer reads
+# their values (KNOWN_GAPS NC-31), so a `true` here enables nothing and a rejected
+# `false` disables nothing. What the check buys is that a config cannot
+# ADVERTISE a weakened base — it is a compatibility/no-weakening validator, not an
+# enforcement point. (REQ-U-04)
 sdp_cfg_check_no_weakening() {
   local file="$1"
   [ -f "$file" ] || return 0
   # FAIL-CLOSED parse of the forced_ext block (the line-based reader alone was bypassable via multi-line flow
   # maps, next-line/quoted values, and null). Rule: a base safety key, if present under forced_ext, MUST be set
   # to a truthy literal (true/yes/on) ON ITS OWN LINE. Anything else — false/no/off/0/null/~, an empty/next-line
-  # value, a quoted key, or ANY non-empty `{...}` inline flow — is treated as a weakening/ambiguity and BLOCKs.
+  # value, a quoted key, or ANY non-empty `{...}` inline flow — is a non-truthy or ambiguous claim and BLOCKs.
   # shellcheck disable=SC1083  # the { below are awk-program syntax inside the single-quoted awk string, not shell brace groups
   awk '
     function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s); return s }
@@ -116,7 +128,7 @@ sdp_cfg_check_no_weakening() {
           else { infe=1; feind=il }               # block map follows
         }
         else if(tkey ~ /^forced_ext\./){          # FLAT dotted key `forced_ext.<subkey>: v` — sdp_cfg_get resolves it
-          subk=tkey; sub(/^forced_ext\./,"",subk) # by literal name, so it can weaken a base key without a block header
+          subk=tkey; sub(/^forced_ext\./,"",subk) # by literal name, so it can carry a base-key claim with no block header
           if(subk in base){
             dv=substr(thead,ci0+1); sub(/[ \t]+#.*$/,"",dv); dv=trim(dv); gsub(/^["\x27]|["\x27]$/,"",dv); dvl=tolower(dv)
             if(dvl!="true" && dvl!="yes" && dvl!="on"){ printf "CONFIG ERROR: forced_ext.%s (dotted key) must be a truthy literal; got \"%s\" (fail-closed)\n", subk, dv > "/dev/stderr"; bad=1 }
@@ -127,13 +139,13 @@ sdp_cfg_check_no_weakening() {
       # inside forced_ext block
       if(t ~ /\{/){ printf "CONFIG ERROR: forced_ext inline flow { } not allowed (fail-closed)\n" > "/dev/stderr"; bad=1; next }
       ci=index(t,":")
-      if(ci<=0){ if(unq(t) in base){ printf "CONFIG ERROR: forced_ext.%s has no value (colonless) — ambiguous, only `%s: true` strengthens (fail-closed)\n", unq(t), unq(t) > "/dev/stderr"; bad=1 } next }  # colonless base key -> weakening
+      if(ci<=0){ if(unq(t) in base){ printf "CONFIG ERROR: forced_ext.%s has no value (colonless) — ambiguous, only `%s: true` is an accepted claim (fail-closed)\n", unq(t), unq(t) > "/dev/stderr"; bad=1 } next }  # colonless base key -> not a truthy claim
       k=trim(substr(t,1,ci-1)); v=trim(substr(t,ci+1));
       gsub(/^["\x27]|["\x27]$/,"",k)               # strip key quotes
       sub(/[ \t]+#.*$/,"",v); v=trim(v); gsub(/^["\x27]|["\x27]$/,"",v); vl=tolower(v)
       if(k in base){
         if(vl!="true" && vl!="yes" && vl!="on"){
-          printf "CONFIG ERROR: forced_ext.%s must be a truthy literal on its line (only strengthening allowed); got \"%s\"\n", k, v > "/dev/stderr";
+          printf "CONFIG ERROR: forced_ext.%s must be a truthy literal on its line (no-weakening claim check); got \"%s\"\n", k, v > "/dev/stderr";
           bad=1
         }
       }

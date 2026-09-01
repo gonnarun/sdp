@@ -16,6 +16,7 @@ SDP is pre-1.0: config keys, marker grammar and the gate CLI may change between 
 - English `COMMAND_MANUAL.md` with a Korean sync copy (`COMMAND_MANUAL.ko.md`).
 
 ### Fixed
+- `scripts/lib/sdp-config.sh` no longer points at an `sdp_cfg_merge()` that was never written. Config resolution is **whole-file selection**, not a 2-layer merge: candidates are checked in precedence order, missing ones are skipped, and the **first safely readable regular file** wins outright (an unsafe or unreadable candidate aborts discovery immediately instead of deferring to the next), so a key absent from it falls back to a built-in default rather than to the user-global file. The no-weakening check over `forced_ext` is likewise restated as what it is — a validator over the *claim* a config makes, not an enforcement point, since it is the only code that recognises the five base safety keys: it rejects a non-truthy value, but an accepted truthy one enables none of the named safety behaviours, no downstream consumer having implemented them. The READMEs say so now, and the gap against REQ-U-04 — including the fact that an accepted truthy value on its five base safety keys enables nothing — is registered as `KNOWN_GAPS` NC-31.
 - Claude Code command adapters no longer document `CODEX_GATE_MODE` as the way to select attended/unattended. The engine has always read `mode` from `gates.yaml` and never from the environment, so the variable was inert and the stated default was wrong; `SDP_GATE_OVERRIDE` is also named correctly now.
 - `.sdp_runtime.env` is documented as agent-readable metadata everywhere; no script or stage sources it as shell code.
 - `worktree-dispatch` now launches Codex implementation workers in `auto` and `orca` modes; Claude Code is restricted to external review gates. The tmux runner probes/starts Codex, Orca pins `--agent codex`, and regression tests assert this boundary.
@@ -34,7 +35,7 @@ SDP is pre-1.0: config keys, marker grammar and the gate CLI may change between 
 ## [0.1.37] — 2026-08-07
 
 ### Added
-- **User-global config fallback (REQ-U-05).** Discovery is now `$PROJECT_DIR/.sdp/` → `$PROJECT_DIR/scripts/sdp/` → `$XDG_CONFIG_HOME/sdp/` → `~/.sdp/`. Project paths always win, and the no-weakening check still runs on whichever file is selected, so a global config can strengthen but never relax the base safety keys.
+- **User-global config fallback (REQ-U-05).** Discovery is now `$PROJECT_DIR/.sdp/` → `$PROJECT_DIR/scripts/sdp/` → `$XDG_CONFIG_HOME/sdp/` → `~/.sdp/`. Project paths always win, and the no-weakening check still runs on whichever file is selected, so a global config can strengthen but never relax the base safety keys. *(Later found to be a validator over the claim only — it rejects a non-truthy value, but an accepted truthy one enables none of the named safety behaviours; see `KNOWN_GAPS` NC-31.)*
 
 ## [0.1.36] and earlier
 

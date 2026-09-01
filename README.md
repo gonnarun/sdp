@@ -262,7 +262,7 @@ $PROJECT_DIR/.sdp/         →  $PROJECT_DIR/scripts/sdp/
   →  $XDG_CONFIG_HOME/sdp/  →  ~/.sdp/
 ```
 
-Project-local paths always win. A selected `defaults.yaml` is still subject to the **no-weakening** check: a user-global config can strengthen the base safety keys but never relax them. Missing files use safe built-in defaults. A present symlink, non-regular file, unreadable file, or relative `XDG_CONFIG_HOME` fails closed instead of falling through.
+Project-local paths always win, and selection is **whole-file, not a per-key merge**: candidates are checked in precedence order, missing ones are skipped, and the **first safely readable regular file** is selected and used alone — a key absent from it falls back to a built-in default, never to a lower-precedence file. Any unsafe or unreadable candidate aborts discovery immediately rather than deferring to the next one. A project `.sdp/defaults.yaml` carrying one key therefore makes the user-global file unread. A selected `defaults.yaml` is still subject to the **no-weakening** check: a `forced_ext` that gives one of the five base safety key names anything but a truthy literal is refused. That check validates the **claim**, not the behaviour: the validator is the only thing that recognises those five names, and no enforcement consumer reads their values (see Known limitations), so it stops a config from advertising a weakened base, not from weakening one. Missing files use safe built-in defaults. A present symlink, non-regular file, unreadable file, or relative `XDG_CONFIG_HOME` fails closed instead of falling through.
 
 `XDG_CONFIG_HOME` is a trusted operator locator and must be absolute. Ambient `HOME` does not redirect fallback: SDP resolves `~/.config/sdp/` and `~/.sdp/` from the password database. Config contents are never sourced as shell code; `.sdp_runtime.env` is metadata for the active command only.
 
@@ -281,7 +281,7 @@ test:
 gate:
   review_checklist_include: <path to project domain rules>   # optional
 
-forced_ext: { ... }                     # project security rules (extend, never weaken the base)
+forced_ext: { ... }                     # project rules; a base safety key may appear only as a truthy claim
 ```
 
 Gate cadence, timeouts and halt limits use the same discovery order in `gates.yaml`. Put shared values in the user-global location; use project `.sdp/gates.yaml` only for a deliberate override.
@@ -381,6 +381,7 @@ See [`docs/KNOWN_GAPS.md`](docs/KNOWN_GAPS.md) for details and code locations.
 - **`output_locale: auto` dual-copy** remains an authoring-time instruction. The anchor records both `OUTPUT_LOCALE` and `OUTPUT_LOCALE_MODE` in runtime metadata, so stages can distinguish automatic dual output from a fixed locale without re-reading a local config file.
 - **Gate-log integrity is honor-plus-evidence, not cryptographic.** The log is same-uid agent-writable; the gate validates structure and freshness, not authorship.
 - **Token budget accounting is not live.** `dispatch.token_budget` enforces only when an external hook supplies `SDP_TOKENS_USED`; no such writer ships.
+- **Config is selected, not merged.** REQ-U-04's "2-layer merge" was never implemented: there is one winning file per basename and no key-level layering. The base safety keys it names (`hardcoded_secret_block`, `redact_secrets`, `no_auto_push_to_main`, `sandbox_outputs_under_base_dir`, `migration_creation_requires_approval`) have no **enforcement** reader either. The claim validator is the only code that recognises them, and it does act on the value — a non-truthy one is rejected and the anchor fails — but an accepted truthy value enables none of the named safety behaviours, because no downstream consumer implements them.
 
 ---
 

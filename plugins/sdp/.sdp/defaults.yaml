@@ -64,5 +64,8 @@ dispatch:
 regression:
   projects: ""                     # e.g. "/path/project-one:/path/project-two:..."
 
-# forced_ext: domain rules (extend only; base safety keys may only strengthen)
+# forced_ext: domain rules. A base safety key may appear here only as a truthy claim --
+# the loader refuses anything else. That validator is the only code recognising these
+# keys; no enforcement consumer acts on their values (NC-31), so the check guards the
+# claim, not behaviour.
 forced_ext: {}
