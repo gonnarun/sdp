@@ -2787,6 +2787,16 @@ def _content_distinct(artifact: Path, children: list[Path]) -> tuple[bool, str]:
     by one character passes, so the honest statement (README, GATE_OPERATIONS, NC-33)
     is that content EQUALITY is refused and semantic narrowing is not verified; the
     human ceremony is what stands behind the rest.
+
+    SCOPE OF THE READ (round-4 review). The comparison is a POINT-IN-TIME observation
+    taken inside the parent's state lock, not a guarantee about the bytes that exist
+    afterwards. Each file's size and content come from one descriptor, which closes
+    the stat-to-open race; what no check can close is that a same-uid writer may
+    change the file after the read, or between this verdict and the SPLIT line, or a
+    second after the split commits. That is true of every artifact this engine reads
+    -- run_review hashes the reviewed artifact the same way -- and it is the reason
+    the recording ceremony, not this function, is what the split rests on. Recorded
+    in NC-33 rather than argued away with a longer read.
     """
     import hashlib
 
