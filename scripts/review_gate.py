@@ -103,6 +103,16 @@ GATE_DRAIN_GRACE = 5
 REASON_PREFIX = "REASON "
 REASON_MAX_CHARS = 2000
 REASON_LINE_CHARS = 400
+# ADR-G20 (issue #4): the split path's own inert log prefix. Same contract as
+# REASON -- prose that must never dispatch in _parse_log.
+SPLIT_RATIONALE_PREFIX = "SPLIT_RATIONALE "
+# Chain depth an artifact may be split to. depth 0 is an original artifact, so the
+# default 2 allows original -> children -> grandchildren and refuses the next.
+# Config key `halt.split_depth_cap`.
+DEFAULT_SPLIT_DEPTH_CAP = 2
+# Fewer than two children is not a split; it is the same scope under a new path,
+# which is exactly the counter bypass this path exists to make unnecessary.
+SPLIT_MIN_CHILDREN = 2
 MODEL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")               # claude model syntax
 # REQ-012 (M6): real agy model names carry spaces/parens ("Gemini 3 Pro (High)").
 # Fixture-backed in tests; captured from the real `agy` binary.
@@ -1182,6 +1192,7 @@ def _state_paths(root: Path, key: str) -> dict[str, Path]:
         "needs_human": Path(f"{stem}.needs_human"),
         "inflight": Path(f"{stem}.inflight"),
         "marker_request": Path(f"{stem}.marker-request"),
+        "split_request": Path(f"{stem}.split-request"),
     }
 
 
@@ -1244,7 +1255,8 @@ def _read_log_counts(log: Path) -> int:
             count += 1
         elif head in ("ALLOW", "INFRA_ERROR", "TEAM_REVIEW", "TEAM_CARRY",
                       "ESCALATION_STALL", "MARKER_AUDIT_FAILED",
-                      REASON_PREFIX.strip()):
+                      "SPLIT", "SPLIT_CHILD_OF", "SPLIT_AUDIT_FAILED",
+                      SPLIT_RATIONALE_PREFIX.strip(), REASON_PREFIX.strip()):
             # D-4: BOTH new heads are counter-neutral HERE as well as in
             # _parse_log. The two tables are independent functions with
             # independent `else` branches, and both else branches do count += 1 --
@@ -1282,6 +1294,18 @@ class _LogState:
     # `>= cadence.marker_span` means expired; span 1 reproduces the pre-span rule
     # that the very next attempt retires the marker.
     blocks_since_marker: int = 0
+    # ADR-G20 (issue #4). A split is a LIFETIME property of the log, not of the
+    # current cycle: `split_closed` survives RESET/OVERRIDE/PIVOT_RESET, because a
+    # parent whose scope was handed to children must not become reviewable again by
+    # a counter reset. `split_depth` likewise -- it is the chain depth this artifact
+    # already sits at, and the cap is measured against the chain, not the cycle.
+    split_closed: bool = False
+    split_depth: int = 0
+    # Distinct BLOCK reason hashes SINCE THE LAST RESET. The split refusal reads it
+    # to tell "the scope keeps producing new defects" (>= 2) from "the author is
+    # looping on one finding" (1) -- derived from the log, never from the requester's
+    # own claim, so it cannot be talked up.
+    distinct_reasons: int = 0
 
 
 def _parse_log(log: Path) -> _LogState:
@@ -1301,6 +1325,9 @@ def _parse_log(log: Path) -> _LogState:
     stall_run = 0
     stall_trailing = False
     blocks_since_marker = 0
+    split_closed = False
+    split_depth = 0
+    reason_hashes: set[str] = set()
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -1310,6 +1337,7 @@ def _parse_log(log: Path) -> _LogState:
         if head in ("RESET", "OVERRIDE"):
             count = 0
             hashes = []
+            reason_hashes = set()
             last_marker = ""   # round numbering restarts -- see _LogState.last_marker
             blocks_since_marker = 0
             stall_run = 0
@@ -1317,6 +1345,7 @@ def _parse_log(log: Path) -> _LogState:
         elif head == "PIVOT_RESET":
             count = 0
             hashes = []
+            reason_hashes = set()
             last_marker = ""   # the pivot's own marker must not survive its reset
             blocks_since_marker = 0
             pivot_count += 1
@@ -1325,6 +1354,8 @@ def _parse_log(log: Path) -> _LogState:
         elif head == "BLOCK_ATTEMPT":
             count += 1
             hashes.append(parts[3] if len(parts) > 3 else "")
+            if len(parts) > 3 and parts[3]:
+                reason_hashes.add(parts[3])
             last_block_ts = parts[2] if len(parts) > 2 else ""
             # last_marker deliberately SURVIVES the attempt now; the counter below
             # is what retires it once it has covered marker_span rounds.
@@ -1350,6 +1381,34 @@ def _parse_log(log: Path) -> _LogState:
             # stall field (an audit failure is neither progress nor a stall).
             last_marker = ""
             blocks_since_marker = 0
+        elif head == "SPLIT":
+            # The parent is terminal from here: its scope now lives in the children
+            # named on this line. Counter-neutral -- a split is neither progress nor
+            # a failed attempt, and the counter it leaves behind is the record of why
+            # the split was allowed.
+            split_closed = True
+        elif head == "SPLIT_AUDIT_FAILED":
+            # Compensating append, the SPLIT twin of MARKER_AUDIT_FAILED: the SPLIT
+            # line above it stays in the log as the record of what was attempted and
+            # is INERT, so the parent is reviewable again rather than silently sealed
+            # by a split no audit row backs.
+            split_closed = False
+        elif head == "SPLIT_CHILD_OF":
+            # Seeded into a CHILD's fresh log by record-split. It carries the chain
+            # depth, which is what `halt.split_depth_cap` is measured against; the
+            # child's own counter still starts at zero, which is the whole point of
+            # the path.
+            for token in parts[1:]:
+                if token.startswith("depth="):
+                    try:
+                        split_depth = max(split_depth, int(token[6:]))
+                    except ValueError:
+                        # Unparsable depth is treated as the cap-exceeding case by
+                        # _split_checks, never as depth 0 (fail-closed).
+                        split_depth = max(split_depth, sys.maxsize)
+        elif head == SPLIT_RATIONALE_PREFIX.strip():
+            # Human-authored prose, persisted and INERT -- same contract as REASON.
+            continue
         elif head == "ESCALATION_STALL":
             stall_run += 1
             stall_trailing = True
@@ -1370,7 +1429,8 @@ def _parse_log(log: Path) -> _LogState:
             # Exactly two branches advance count: BLOCK_ATTEMPT and this one.
             blocks_since_marker += 1
     return _LogState(count, hashes[-2:], last_marker, last_block_ts, pivot_count,
-                     stall_run, stall_trailing, blocks_since_marker)
+                     stall_run, stall_trailing, blocks_since_marker,
+                     split_closed, split_depth, len(reason_hashes))
 
 
 def _ts_to_epoch(ts: str) -> float:
@@ -1849,6 +1909,72 @@ def _state_lock(lock_path: Path, deadline: float):
             os.close(fd)
 
 
+def _split_command_hint(root: Path, artifact: Path) -> str:
+    # The prepare verb only. record-split is deliberately NOT rendered here: this
+    # text reaches an agent's stdout, and the recording command belongs in the
+    # request file a human opens (the ADR-G01 contract prepare-marker already keeps).
+    return (
+        f"python3 {_shq(str(Path(__file__).resolve()))} --cwd {_shq(str(root))} "
+        f"prepare-split {_shq(str(artifact))} "
+        "--split-child <narrower-artifact> --split-child <narrower-artifact> "
+        "--split-rationale <why the scope cannot converge>"
+    )
+
+
+def _halt_guidance(root: Path, artifact: Path, prior: int | None, state: "_LogState | None") -> str:
+    """The paragraph every halt carries (issue #4 request 1).
+
+    A halt used to return one line with an empty body. An agent that is told only
+    that it lost, with no sanctioned move, fills the gap itself -- and the moves it
+    invents are the human-only ones (delete `.halt`, zero the counter, set
+    `SDP_GATE_OVERRIDE`), which it then offers the user as choices. Naming the one
+    thing the agent may do, and naming the levers it may NOT propose, is what closes
+    that. Downstream repositories were each writing this paragraph into their own
+    project rules; it belongs in the engine that knows the state.
+    """
+    lines = [
+        "",
+        "HALT. This gate will not review this artifact again until a human acts.",
+        "",
+        "WHAT YOU (the agent) DO NOW -- this is the whole job: stop, and report.",
+        "  The report carries: the artifact path; the halt reason above; the cumulative",
+        "  BLOCK count; the gist of the last finding; what you resolved and what you did",
+        "  not. Then stop. Do not retry the gate: after a halt every retry returns this",
+        "  same line without reviewing anything.",
+        "",
+        "HUMAN-ONLY LEVERS -- DO NOT PROPOSE THESE AND DO NOT USE THEM:",
+        "  RESET / OVERRIDE / PIVOT_RESET log lines, and SDP_GATE_OVERRIDE. Each needs a",
+        "  terminal, a human-provisioned token, and for a state-changing decision a typed",
+        "  confirmation. They exist for the human at the keyboard, not as options to put",
+        "  to the user. There is also no gate command that deletes the halt flag; the",
+        "  gate state files are not yours to edit.",
+        "",
+        "TEAM MARKERS ARE NOT CONSULTED AFTER A HALT. The halt is decided before the",
+        "  marker anchor is computed, so preparing or recording one now changes nothing.",
+    ]
+    if state is not None and state.split_closed:
+        lines += [
+            "",
+            "THIS ARTIFACT WAS SPLIT. Its scope now lives in the children named on the",
+            "  SPLIT line of the gate log. Gate those, not this. This artifact is closed.",
+        ]
+    else:
+        lines += [
+            "",
+            "THE ONE WAY FORWARD, when the artifact is too broad to converge (each round",
+            "  raises a different defect rather than the same one): SPLIT it into narrower",
+            "  artifacts. That is a recorded, human-approved path -- not a reset. The",
+            "  parent is closed as SPLIT, each child starts its own counter, and the",
+            "  parent's halt history is linked from the child's log. You may PREPARE the",
+            "  request; a human records it at a terminal:",
+            f"    {_split_command_hint(root, artifact)}",
+            "  prepare-split writes a request file for the human and touches no gate state.",
+        ]
+    if prior is not None:
+        lines += ["", f"Cumulative BLOCK attempts on this artifact: {prior}."]
+    return "\n".join(lines)
+
+
 def run_review(
     review_prompt: str,
     artifact_path: str,
@@ -2000,12 +2126,29 @@ def run_review(
                 return _unauditable_allow(result)
             return result
         if paths["halt"].exists():
+            # The log is parsed HERE, on a path that used to return without reading
+            # it, for two reasons: the guidance must say whether this artifact was
+            # already split (in which case the way forward is the children, not
+            # another split), and the report the agent is told to write needs the
+            # cumulative count. Read-only -- no counter moves on a halted gate.
+            try:
+                halted_state = _parse_log(paths["log"])
+            except InfraError:
+                halted_state = None
+            halted_round = halted_state.count if halted_state else None
+            line = (
+                "BLOCK: artifact was split; gate the children, not this artifact"
+                if halted_state and halted_state.split_closed
+                else "BLOCK: gate halted (user intervention required)"
+            )
             result = {
                 "verdict": "BLOCK", "provider": "none",
-                "line": "BLOCK: gate halted (user intervention required)", "output": "",
-                "reason": "halt", "exit_code": 1, "timeout": False, "round": None,
+                "line": line,
+                "output": _halt_guidance(root, artifact, halted_round, halted_state),
+                "reason": "split_closed" if (halted_state and halted_state.split_closed) else "halt",
+                "exit_code": 1, "timeout": False, "round": halted_round,
             }
-            _record(audit_base, artifact, key, None, result, config_source)
+            _record(audit_base, artifact, key, halted_round, result, config_source)
             return result
         state = _parse_log(paths["log"])
         prior = state.count
@@ -2016,7 +2159,8 @@ def run_review(
                 raise InfraError("halt write failed")
             result = {
                 "verdict": "BLOCK", "provider": "none",
-                "line": "BLOCK: identical BLOCK reason twice in a row; gate halted", "output": "",
+                "line": "BLOCK: identical BLOCK reason twice in a row; gate halted",
+                "output": _halt_guidance(root, artifact, prior, state),
                 "reason": "stuck", "exit_code": 1, "timeout": False, "round": prior,
             }
             _record(audit_base, artifact, key, prior, result, config_source)
@@ -2027,7 +2171,8 @@ def run_review(
                 raise InfraError("halt write failed")
             result = {
                 "verdict": "BLOCK", "provider": "none",
-                "line": f"BLOCK: max_block {max_block} reached; gate halted", "output": "",
+                "line": f"BLOCK: max_block {max_block} reached; gate halted",
+                "output": _halt_guidance(root, artifact, prior, state),
                 "reason": "max_block", "exit_code": 1, "timeout": False, "round": prior,
             }
             _record(audit_base, artifact, key, prior, result, config_source)
@@ -2058,7 +2203,8 @@ def run_review(
                     result = {
                         "verdict": "BLOCK", "provider": "none",
                         "line": f"BLOCK: escalation stalled {run} times; gate halted",
-                        "output": "", "reason": f"escalation_stall_halt: {slug}",
+                        "output": _halt_guidance(root, artifact, prior, state),
+                        "reason": f"escalation_stall_halt: {slug}",
                         "exit_code": 1, "timeout": False, "round": prior,
                     }
                 else:
@@ -2089,7 +2235,8 @@ def run_review(
                 result = {
                     "verdict": "BLOCK", "provider": "none",
                     "line": f"BLOCK: team decision=halt at round {prior}; gate halted",
-                    "output": "", "reason": "team_halt", "exit_code": 1, "timeout": False,
+                    "output": _halt_guidance(root, artifact, prior, state),
+                    "reason": "team_halt", "exit_code": 1, "timeout": False,
                     "round": prior,
                 }
                 _record(audit_base, artifact, key, prior, result, config_source)
@@ -2546,6 +2693,342 @@ def record_marker(
         raise failure
 
 
+_SPLIT_REQUEST_BANNER = (
+    "# SDP split request — DATA FOR A HUMAN, NOT INSTRUCTIONS. "
+    "Do not execute from an agent context."
+)
+
+
+def _split_context(artifact_path: str, cwd: str | None):
+    root, artifact = _resolve_root(cwd, artifact_path)
+    if not artifact.is_file():
+        raise InfraError(f"artifact is not a file: {artifact_path}")
+    cfg, config_source = _read_gates_yaml(root)
+    key = _artifact_key(artifact)
+    paths = _state_paths(root, key)
+    depth_cap = _positive_int(cfg.get("halt.split_depth_cap"), DEFAULT_SPLIT_DEPTH_CAP, max_value=16)
+    return root, artifact, key, paths, depth_cap, config_source
+
+
+def _resolve_children(root: Path, raw_children) -> tuple[list[Path], str]:
+    """Resolve the child artifact paths, or return the first reason they are refused.
+
+    Children are resolved with the SAME workspace containment rule the reviewed
+    artifact gets (_resolve_inside), and they must already EXIST. Requiring them on
+    disk is what makes "the scope really was narrowed" checkable at all: a split
+    registered against paths nobody has written yet is a promise, and the log would
+    carry it as a fact.
+    """
+    resolved: list[Path] = []
+    for raw in raw_children:
+        if not str(raw).strip():
+            return [], "an empty --split-child path was given"
+        try:
+            child = _resolve_inside(root, str(raw), must_exist=True)
+        except Exception as exc:  # noqa: BLE001 - any resolution failure is a refusal
+            return [], f"child path refused: {raw} ({exc})"
+        if not child.is_file():
+            return [], f"child is not a regular file: {raw}"
+        resolved.append(child)
+    return resolved, ""
+
+
+def _split_checks(
+    artifact: Path,
+    children: list[Path],
+    child_error: str,
+    rationale: str,
+    state: _LogState,
+    halted: bool,
+    depth_cap: int,
+) -> list[tuple[bool, str]]:
+    """ADR-G20's refusals, in order, as a PASS/FAIL checklist.
+
+    The two that carry the weight are (5) and (6). (5) reads the log's own distinct
+    BLOCK reason hashes rather than the requester's description of them: a split is
+    for a scope that keeps producing NEW defects, and one reason repeated is the
+    author failing to fix, which a narrower artifact does not cure. (6) caps the
+    chain, because an uncapped split is precisely the counter bypass this path
+    exists to replace -- the gate keys state by artifact path, so splitting has
+    ALWAYS reset the counter as a side effect; making it sanctioned without a cap
+    would legitimise infinite retries.
+    """
+    flat = " ".join((rationale or "").split())
+    depth = state.split_depth
+    return [
+        (halted, "(0) the artifact is halted (split is a halt-recovery path, not a shortcut)"),
+        (not state.split_closed, "(1) the artifact has not already been split"),
+        (
+            not child_error and len(children) >= SPLIT_MIN_CHILDREN,
+            f"(2) at least {SPLIT_MIN_CHILDREN} child artifacts were given"
+            + (f" -- {child_error}" if child_error else f" (got {len(children)})"),
+        ),
+        (
+            not child_error and len({str(c) for c in children}) == len(children),
+            "(3) the child artifacts are distinct paths",
+        ),
+        (
+            not child_error and all(str(c) != str(artifact) for c in children),
+            "(4) no child is the parent artifact under another name",
+        ),
+        (
+            state.distinct_reasons >= 2,
+            f"(5) the log shows the scope producing different defects "
+            f"({state.distinct_reasons} distinct BLOCK reasons; need 2+). One reason "
+            f"repeated is an unfixed finding, not an oversized artifact",
+        ),
+        (
+            bool(flat),
+            "(6) --split-rationale states why the scope cannot converge",
+        ),
+        (
+            depth + 1 <= depth_cap,
+            f"(7) the resulting chain depth {depth + 1} is within halt.split_depth_cap "
+            f"{depth_cap}",
+        ),
+    ]
+
+
+def _record_split_command(root: Path, artifact: Path, children: list[Path], rationale: str) -> str:
+    # Same contract as _record_marker_command: one directly runnable line, pinned to
+    # THIS engine, which never reaches stdout and lives only inside the request file.
+    words = [
+        _shq(sys.executable), _shq(str(Path(__file__).resolve())),
+        "--cwd", _shq(str(root)), "record-split", _shq(str(artifact)),
+    ]
+    for child in children:
+        words.extend(["--split-child", _shq(str(child))])
+    if rationale:
+        words.extend(["--split-rationale", _shq(" ".join(rationale.split()))])
+    words.append(CONFIRM_FLAG)
+    return " ".join(words)
+
+
+def prepare_split(
+    artifact_path: str,
+    cwd: str | None = None,
+    *,
+    children: tuple[str, ...] = (),
+    rationale: str = "",
+    redact: bool = False,
+) -> tuple[Path, bool, list[str]]:
+    """A RESTRICTED WRITER, LOCK-FREE -- prepare_marker's contract, for splits.
+
+    Writes exactly one file, <gate>/review_gate_<key>.split-request, and touches no
+    log, no .halt, no .infra_flag, no .needs_human, no .inflight and no audit file.
+    It takes no lock: like the marker request, the file is AN INSTRUCTION TO A
+    HUMAN, NOT A DECISION, and record_split re-validates everything under the state
+    lock, so a stale observation can only produce a refusal.
+    """
+    root, artifact, _key, paths, depth_cap, _cs = _split_context(artifact_path, cwd)
+    state = _parse_log(paths["log"])
+    halted = paths["halt"].exists()
+    resolved, child_error = _resolve_children(root, children)
+    checks = _split_checks(
+        artifact, resolved, child_error, rationale, state, halted, depth_cap
+    )
+    ok = all(flag for flag, _ in checks)
+    checklist = [("PASS " if flag else "FAIL ") + label for flag, label in checks]
+    command = _record_split_command(root, artifact, resolved, rationale)
+    if redact:
+        # The MCP payload contract: the recording command never leaves this
+        # function on the redacted path, so it cannot be scraped from a tool result
+        # and run. It is still on disk in the request file for the human (NC-18).
+        checklist = [c for c in checklist if command not in c]
+
+    if ok:
+        body = [
+            _SPLIT_REQUEST_BANNER,
+            "# STATE-CHANGING DECISION: recording this CLOSES the parent artifact as",
+            "# SPLIT and seeds a fresh counter for each child. It needs a terminal, a",
+            f"# token, {CONFIRM_FLAG} and a typed confirmation phrase.",
+            f"observed_at={_now_z()} observed_round={state.count} "
+            f"observed_depth={state.split_depth} advisory=true",
+            "",
+            "## Parent",
+            str(artifact),
+            "",
+            "## Children",
+            *[str(c) for c in resolved],
+            "",
+            "## Rationale",
+            " ".join((rationale or "").split()),
+            "",
+            "## Checks",
+            *checklist,
+            "",
+            "## Command",
+            command,
+            "",
+            "# The parent stays halted and becomes terminal: after this, gating the",
+            "# parent returns 'artifact was split'. Each child starts at round 0 with",
+            "# the parent's halt history linked from its own log.",
+            "",
+        ]
+        _write_request(paths["split_request"], "\n".join(body))
+    return paths["split_request"], ok, checklist
+
+
+def record_split(
+    artifact_path: str,
+    cwd: str | None = None,
+    *,
+    children: tuple[str, ...] = (),
+    rationale: str = "",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """THE ONLY PATH THAT CLOSES A PARENT AS SPLIT (ADR-G20).
+
+    Ceremony is pivot-strength on purpose: TTY, human token, the confirm flag and a
+    typed phrase. The write order is CHILDREN FIRST, PARENT LAST -- a half-finished
+    split then leaves the parent still halted and reviewable, which is the recoverable
+    state; sealing the parent first and failing on a child would strand the work with
+    no path at all.
+    """
+    import time
+
+    def _refuse(msg: str) -> dict[str, Any]:
+        return {
+            "verdict": "BLOCK", "provider": "human", "line": f"BLOCK: {msg}",
+            "output": "", "reason": msg, "exit_code": 1, "timeout": False, "round": None,
+        }
+
+    if not _ISATTY(0):
+        return _refuse("record-split requires a terminal (stdin is not a TTY); nothing was written")
+    if not _marker_token_ok():
+        return _refuse(
+            "record-split requires SDP_MARKER_HUMAN to match ~/.sdp/marker.token; nothing was written"
+        )
+
+    root, artifact, key, paths, depth_cap, config_source = _split_context(artifact_path, cwd)
+    audit_base = _audit_base(root)
+    prior = _parse_log(paths["log"]).count
+
+    if not confirmed:
+        return _refuse(
+            f"record-split closes the parent artifact; re-run with {CONFIRM_FLAG}; nothing was written"
+        )
+    resolved, child_error = _resolve_children(root, children)
+    expected = f"record split for {artifact.stem} into {len(resolved)} at round {prior}"
+    print(f"Type exactly:  {expected}")
+    try:
+        typed = input().strip()
+    except EOFError:
+        typed = ""
+    if typed != expected:   # exact after strip, case-sensitive, ONE attempt
+        return _refuse("confirmation phrase mismatch; nothing was written")
+
+    if _inflight_active(paths["inflight"]):
+        return _refuse("a review is in flight for this artifact; retry when it finishes")
+
+    with _state_lock(paths["lock"], time.monotonic() + 30):
+        if _inflight_active(paths["inflight"]):
+            return _refuse("a review is in flight for this artifact; retry when it finishes")
+        state = _parse_log(paths["log"])
+        prior = state.count
+        halted = paths["halt"].exists()
+        for flag, label in _split_checks(
+            artifact, resolved, child_error, rationale, state, halted, depth_cap
+        ):
+            if not flag:
+                return _refuse(f"split refused: {label}; nothing was written")
+
+        depth = state.split_depth + 1
+        stamp = _now_z()
+        # ---- children first (see the docstring's write-order note) -----------
+        seeded: list[str] = []
+        for child in resolved:
+            child_key = _artifact_key(child)
+            child_paths = _state_paths(root, child_key)
+            child_state = _parse_log(child_paths["log"])
+            if child_state.count or child_state.split_closed:
+                return _refuse(
+                    f"child {child.name} already carries gate state (round "
+                    f"{child_state.count}); split children must be fresh artifacts; "
+                    "nothing was written"
+                )
+            with _state_lock(child_paths["lock"], time.monotonic() + 30):
+                if not _APPEND_LINE(
+                    child_paths["log"],
+                    f"SPLIT_CHILD_OF {stamp} parent={key} parent_round={prior} depth={depth}",
+                ):
+                    raise InfraError(f"SPLIT_CHILD_OF append failed for {child.name}")
+                for line in _split_rationale_lines(rationale):
+                    if not _APPEND_LINE(child_paths["log"], line):
+                        raise InfraError(f"SPLIT_RATIONALE append failed for {child.name}")
+            seeded.append(child_key)
+
+        # ---- then seal the parent -------------------------------------------
+        for line in _split_rationale_lines(rationale):
+            if not _APPEND_LINE(paths["log"], line):
+                raise InfraError("SPLIT_RATIONALE append failed")
+        split_line = (
+            f"SPLIT {stamp} depth={depth} children={len(resolved)} keys={','.join(seeded)}"
+        )
+        if not _APPEND_LINE(paths["log"], split_line):
+            raise InfraError("SPLIT append failed")
+
+        result = {
+            "verdict": "SPLIT", "provider": "human",
+            "line": (
+                f"SPLIT: {artifact.name} closed at round {prior}; "
+                f"{len(resolved)} child artifact(s) seeded at depth {depth}"
+            ),
+            "output": "Gate each child from now on. The parent returns "
+                      "'artifact was split' on any further review.",
+            "reason": f"split children={len(resolved)} depth={depth}",
+            "exit_code": 0, "timeout": False, "round": prior,
+        }
+        if _record(audit_base, artifact, key, prior, result, config_source):
+            return result
+
+        # ---- the audit row was NOT written -- compensate, as record_marker does
+        if _APPEND_LINE(paths["log"], f"SPLIT_AUDIT_FAILED {_now_z()}"):
+            # The SPLIT is now INERT: the parent is halted-but-reviewable again
+            # rather than sealed by a split nothing audited. The child seeds stay,
+            # and are harmless -- a seeded child log carries no counter.
+            if not _write_flag(
+                paths["infra_flag"], "split audit row not written; split invalidated\n"
+            ):
+                raise InfraError("infra_flag write failed after SPLIT_AUDIT_FAILED")
+            return {
+                "verdict": "INFRA_ERROR", "provider": "human",
+                "line": "BLOCK: INFRA_ERROR (split audit row not written; "
+                        "the split was invalidated by SPLIT_AUDIT_FAILED)",
+                "output": "", "reason": "split_audit_failed", "exit_code": 1,
+                "timeout": False, "round": prior,
+            }
+        flag_ok = _write_flag(
+            paths["infra_flag"],
+            "split audit row not written AND the compensating append failed\n",
+        )
+        failure = InfraError(
+            "split audit row not written and the compensating SPLIT_AUDIT_FAILED "
+            "append also failed; the parent is STILL CLOSED as SPLIT"
+        )
+        if not flag_ok:
+            raise failure from InfraError("infra_flag write also failed")
+        raise failure
+
+
+def _split_rationale_lines(text: str) -> list[str]:
+    # _reason_log_lines' contract under the split prefix: C0 controls replaced (not
+    # dropped), whitespace collapsed, capped, and every emitted line carries a head
+    # _parse_log skips. A rationale beginning "RESET" must not zero a counter.
+    if not text:
+        return []
+    flat = "".join(" " if (ch < " " or ch == "\x7f") else ch for ch in text)
+    flat = " ".join(flat.split())
+    if not flat:
+        return []
+    if len(flat) > REASON_MAX_CHARS:
+        flat = flat[:REASON_MAX_CHARS] + " [truncated]"
+    return [
+        SPLIT_RATIONALE_PREFIX + flat[i:i + REASON_LINE_CHARS]
+        for i in range(0, len(flat), REASON_LINE_CHARS)
+    ]
+
+
 def _doctor_gate_state(root: Path, lines: list[str]) -> bool:
     """Read-only gate-state section (REQ-033). No lock, no writes.
 
@@ -2824,22 +3307,42 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--marker-{_field}", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         CONFIRM_FLAG, dest="state_change_ack", action="store_true",
-        help="Required for --marker-decision pivot|halt, alongside a typed confirmation.",
+        help="Required for --marker-decision pivot|halt and for record-split, "
+             "alongside a typed confirmation.",
+    )
+    # ADR-G20 (issue #4): the halt-recovery split. Repeatable child paths, one
+    # rationale. Valid ONLY with prepare-split / record-split, enforced below.
+    parser.add_argument(
+        "--split-child", dest="split_child", action="append", default=[], metavar="PATH",
+        help="Child artifact of a split (repeat once per child; 2 minimum).",
+    )
+    parser.add_argument(
+        "--split-rationale", dest="split_rationale", default="", metavar="TEXT",
+        help="Why the parent's scope cannot converge (recorded in the gate log).",
     )
     parser.add_argument("prompt", nargs="?", help="Review prompt or @prompt-file")
     parser.add_argument("artifact", nargs="?", help="Artifact path inside cwd")
     args = parser.parse_args(argv)
 
     marker_fields = {f: getattr(args, f"marker_{f}") or "" for f in MARKER_FIELDS}
+    split_flags_used = bool(args.split_child) or bool(args.split_rationale)
+    split_verb = args.prompt in ("prepare-split", "record-split")
+    marker_verb = args.prompt in ("prepare-marker", "record-marker")
     marker_flags_used = (
         args.marker_decision != "continue"
         or any(marker_fields.values())
-        or args.state_change_ack
+        # CONFIRM_FLAG is shared with record-split, so it only counts as a marker
+        # flag when the verb is not a split one -- otherwise the split ceremony's
+        # own acknowledgement would be rejected as a stray marker flag.
+        or (args.state_change_ack and not split_verb)
     )
-    if marker_flags_used and args.prompt not in ("prepare-marker", "record-marker"):
+    if marker_flags_used and not marker_verb:
         # §4.5 Q19: REJECTED, not ignored. Silent acceptance is how a
         # `--marker-decision halt` typo becomes invisible.
         print("BLOCK: --marker-* flags are only valid with prepare-marker or record-marker")
+        return 1
+    if split_flags_used and not split_verb:
+        print("BLOCK: --split-* flags are only valid with prepare-split or record-split")
         return 1
 
     if args.prompt in ("prepare-marker", "record-marker"):
@@ -2867,6 +3370,41 @@ def main(argv: list[str] | None = None) -> int:
             print(f"BLOCK: INFRA_ERROR ({exc})")
             return 1
         print(result["line"])
+        return 0 if result.get("exit_code") == 0 else 1
+
+    if split_verb:
+        if not args.artifact:
+            print(
+                f"BLOCK: usage: review_gate.py [--cwd DIR] {args.prompt} <parent-artifact> "
+                "--split-child <path> --split-child <path> --split-rationale <text>"
+            )
+            return 1
+        try:
+            if args.prompt == "prepare-split":
+                request_path, ok, checklist = prepare_split(
+                    args.artifact, args.cwd,
+                    children=tuple(args.split_child), rationale=args.split_rationale,
+                )
+                # stdout carries the request path and the checklist ONLY -- never
+                # the record-split command (ADR-G01's contract, applied to splits).
+                print(str(request_path))
+                for entry in checklist:
+                    print(entry)
+                if not ok:
+                    print("BLOCK: split request refused; see the FAIL lines above")
+                return 0 if ok else 1
+            result = record_split(
+                args.artifact, args.cwd,
+                children=tuple(args.split_child), rationale=args.split_rationale,
+                confirmed=args.state_change_ack,
+            )
+        except Exception as exc:  # noqa: BLE001 - the CLI must fail closed.
+            print(f"BLOCK: INFRA_ERROR ({exc})")
+            return 1
+        print(result["line"])
+        detail = result.get("output") or ""
+        if detail:
+            print(detail)
         return 0 if result.get("exit_code") == 0 else 1
 
     if args.print_state_path:

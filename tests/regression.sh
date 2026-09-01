@@ -82,6 +82,23 @@ cad "$SPANBAD" "marker_span: 5" "relaxation_ack: declared-for-test"
 bash "$REG" "$SPANBAD" >/dev/null 2>&1 && bad "marker_span=5 should FAIL even when declared" \
   || ok "harness DETECTS marker_span past the envelope (5) despite a declaration"
 
+# --- 3b-split: the halt-recovery split's depth cap (issue #4). The split path
+#     restarts every child's counter, so the chain cap is what stops "split until
+#     it passes". Lower is always fine; higher needs the declaration, and 3 is the
+#     ceiling even with one.
+SPLIT_OK="$TMP/splitok"; mkfixture "$SPLIT_OK" 6 13 false
+printf 'halt:\n  split_depth_cap: 1\n' >> "$SPLIT_OK/.sdp/gates.yaml"
+bash "$REG" "$SPLIT_OK" >"$TMP/splitok.out" 2>&1 \
+  && ok "harness ACCEPTS a stricter split_depth_cap (1)" \
+  || bad "stricter split_depth_cap rejected ($(tail -1 "$TMP/splitok.out"))"
+SPLIT_BAD="$TMP/splitbad"; mkfixture "$SPLIT_BAD" 6 13 false
+printf 'halt:\n  split_depth_cap: 4\n' >> "$SPLIT_BAD/.sdp/gates.yaml"
+bash "$REG" "$SPLIT_BAD" >"$TMP/splitbad.out" 2>&1 \
+  && bad "split_depth_cap=4 should FAIL" \
+  || ok "harness DETECTS a split_depth_cap past the envelope (4)"
+grep -q 'unlimited counter reset' "$TMP/splitbad.out" \
+  && ok "split depth FAIL names why the cap exists" || bad "split depth FAIL reason missing"
+
 # --- 3c: the COMBINATION invariant (codex review HIGH-1). Both triples below are
 #         inside the envelope and declared, yet every window anchor is TEAM_CARRY,
 #         so fresh outputs= evidence is never demanded in rounds ef..max_block.

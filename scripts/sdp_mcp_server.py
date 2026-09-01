@@ -144,6 +144,39 @@ def _tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "sdp_prepare_split",
+            "description": (
+                "PREPARE ONLY -- this tool NEVER writes gate state. Use it when a gate has "
+                "HALTED and the artifact is too broad to converge (each round raises a "
+                "different defect). It composes the split a human would record and writes "
+                "exactly one file, <gate>/review_gate_<key>.split-request (mode 0600, "
+                "atomically published); it touches no gate log, no .halt, no .infra_flag, no "
+                ".needs_human, no .inflight and no audit file, and takes no lock. The result "
+                "payload is REDACTED: request file path plus the PASS/FAIL checklist only, "
+                "never the record-split command. Recording the split is a human action at a "
+                "terminal via `review_gate.py record-split`, which refuses without a TTY, a "
+                "human-provisioned token and a typed confirmation. Splitting closes the parent "
+                "and starts each child at round 0, so it is NOT a counter reset you may take "
+                "yourself -- and the human-only levers (RESET/OVERRIDE/PIVOT_RESET, "
+                "SDP_GATE_OVERRIDE) are never yours to propose."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["artifact_path", "children", "rationale"],
+                "properties": {
+                    "artifact_path": {"type": "string"},
+                    "children": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                    },
+                    "rationale": {"type": "string"},
+                    "cwd": {"type": "string"},
+                },
+            },
+        },
+        {
             "name": "sdp_gate_doctor",
             "description": "Report local codex/Claude/agy gate toolchain and gate-state status.",
             "inputSchema": {
@@ -190,6 +223,38 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             # pivot/halt request file can only be composed by a human at the CLI.
             request_path, ok, checklist = review_gate.prepare_marker(
                 artifact_path, cwd, redact=True, **fields
+            )
+        except Exception as exc:  # noqa: BLE001 - MCP result must fail closed as data.
+            return {
+                "content": [{"type": "text", "text": f"BLOCK: INFRA_ERROR ({exc})"}],
+                "isError": False,
+            }
+        text = "\n".join([
+            f"request_file: {request_path}",
+            f"status: {'PREPARED' if ok else 'REFUSED'}",
+            *checklist,
+        ])
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    if name == "sdp_prepare_split":
+        artifact_path = args.get("artifact_path")
+        cwd = args.get("cwd")
+        children = args.get("children")
+        rationale = args.get("rationale", "")
+        if not isinstance(artifact_path, str):
+            return {"content": [{"type": "text", "text": "artifact_path must be a string"}], "isError": True}
+        if cwd is not None and not isinstance(cwd, str):
+            return {"content": [{"type": "text", "text": "cwd must be a string"}], "isError": True}
+        if not isinstance(children, list) or not all(isinstance(c, str) for c in children):
+            return {"content": [{"type": "text", "text": "children must be an array of strings"}], "isError": True}
+        if not isinstance(rationale, str):
+            return {"content": [{"type": "text", "text": "rationale must be a string"}], "isError": True}
+        try:
+            # redact=True is the same enforcement prepare_marker gets: the
+            # record-split command structurally cannot leave through this boundary,
+            # so an agent cannot scrape it out of a tool result and run it.
+            request_path, ok, checklist = review_gate.prepare_split(
+                artifact_path, cwd, children=tuple(children), rationale=rationale, redact=True
             )
         except Exception as exc:  # noqa: BLE001 - MCP result must fail closed as data.
             return {

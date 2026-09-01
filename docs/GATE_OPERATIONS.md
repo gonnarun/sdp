@@ -97,6 +97,7 @@ file operation, and the sanctioned paths for it are named in each row.
 | `…​.needs_human` | **The gate refused to run a review and nobody has retried.** Written on the *first* escalation stall. This is not an infra failure: it means a human owes the artifact a team review. | A review actually executing — L5's `ALLOW` and BLOCK arms — or the override path. An `INFRA_ERROR` deliberately does **not** clear it, because no review ran. |
 | `…​.inflight` | A review is running between the two lock acquisitions. `record-marker` refuses while it is younger than 555 s; older ones are stale and are removed automatically. | The end of the review, on all three outcomes including `INFRA_ERROR`. |
 | `…​.marker-request` | A `prepare-marker` request file: data for a human, never instructions. It is advisory and stamps its own staleness. | Nothing reads it but a person; the next `prepare-marker` replaces it atomically. |
+| `…​.split-request` | A `prepare-split` request file: the halt-recovery split a human would record, data for a person and never instructions. Advisory; stamps its own staleness. | Nothing reads it but a person; the next `prepare-split` replaces it atomically. |
 | `…​.lock` | The `fcntl.flock` file. Its **presence proves nothing** — it is never unlinked. | Kernel release on process exit. |
 
 `python3 scripts/review_gate.py --cwd <dir> doctor` reports all of this and **exits non-zero**
@@ -137,3 +138,45 @@ succeed even under a pty.
 
 Running `record-marker` twice is safe and **the second marker wins**: both lines stay in the log
 as an audit trail, and only the last is consumed by the escalation check.
+
+## Splitting a halted artifact
+
+A halt is terminal: the artifact is not reviewed again, and the agent's only sanctioned move is
+to stop and report. When the halt is a **scope** problem — every round raised a different defect
+rather than the same one — the recovery is to split the artifact into narrower ones. Ceremony is
+deliberately pivot-strength, because splitting restarts each child's counter.
+
+```
+python3 scripts/review_gate.py --cwd <dir> prepare-split <parent> \
+  --split-child <narrower-1> --split-child <narrower-2> --split-rationale "<why>"
+```
+
+`prepare-split` writes the request file, prints its path and a PASS/FAIL checklist, and touches
+no gate state — never the `record-split` command, which lives only inside the request file. The
+human then runs that command at a terminal: it needs a TTY, `SDP_MARKER_HUMAN` matching
+`~/.sdp/marker.token`, `--i-am-recording-a-state-changing-decision`, and the typed phrase
+`record split for <stem> into <n> at round <r>`.
+
+What it refuses, and why each refusal is load-bearing — gate state is keyed by the artifact's
+absolute path, so splitting has **always** restarted the counter as a side effect. Making it
+sanctioned without these would turn an accident into a supported bypass:
+
+| Refusal | Reason |
+|---|---|
+| the artifact is not halted | the split is a halt recovery, not a shortcut past the fix loop |
+| already split | a parent is closed once |
+| fewer than two children, or a child that is the parent | that is a rename, not a split |
+| a child path that does not exist | a split registered against paths nobody wrote is a promise recorded as a fact |
+| a child that already carries gate state | children are new work, not a way to move a counter |
+| no rationale | the log has to say why the scope could not converge |
+| fewer than two distinct BLOCK reasons in the log | one reason repeated is an unfixed finding; a narrower artifact does not cure it |
+| chain depth past `halt.split_depth_cap` (default 2) | uncapped, the path becomes "split until it passes" |
+
+Write order is **children first, parent last**: a half-finished split leaves the parent halted
+and recoverable rather than sealed with nowhere to go. If the audit row cannot be written the
+split is compensated with `SPLIT_AUDIT_FAILED`, which makes the `SPLIT` line inert and returns
+the parent to the halted-but-unsealed state.
+
+After the split, the parent answers `BLOCK: artifact was split; gate the children` and keeps its
+own BLOCK history; each child's log opens with
+`SPLIT_CHILD_OF parent=<key> parent_round=<n> depth=<d>`, and its counter starts at zero.

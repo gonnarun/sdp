@@ -267,6 +267,33 @@ The gate keeps **per-artifact, on-disk state** (a date-free log keyed by the art
 
 **Who the roster names.** Because the gate checks cardinality and distinctness but not identity, it cannot tell a real team review from two invented names — the roster is a statement you are accountable for, not something the engine proves. Name the **Agent-team roles that actually examined the artifact** (Planner, Evaluator, Explorer, Researcher, Designer, Runner, Security — the table under *Agent team*), each from its own angle, and cite what they produced in `outputs=`. The point of escalation is to replace one model looking again with several perspectives looking once. **`agy` does not belong in a roster**: it is the infrastructure fallback for the primary reviewer, and listing it substitutes one more external model call for the multi-perspective review the escalation exists to force.
 
+### When a gate halts — what you do, and what only a human does (REQ-E, issue #4)
+A halt is not a verdict you can retry past: every later review returns the same line without reviewing anything. The gate now prints the whole procedure in the halt body itself, and this is the canonical copy of it:
+
+- **Your only move is to stop and report.** The report carries the artifact path, the halt reason, the cumulative BLOCK count, the gist of the last finding, and what you resolved versus what you did not.
+- **`RESET` / `OVERRIDE` / `PIVOT_RESET` and `SDP_GATE_OVERRIDE` are human-only.** Do not use them and **do not offer them to the user as options** — they need a terminal, a human-provisioned token, and for a state-changing decision a typed confirmation. There is also no gate command that deletes `.halt`; the gate state files are not yours to edit.
+- **Team markers are not consulted after a halt.** The halt is decided before the marker anchor is computed, so preparing or recording one changes nothing once `.halt` exists.
+
+### Splitting a halted artifact (the sanctioned recovery)
+A halt usually means the artifact's **scope** was too broad: every round raises a *different* defect, and fixing one exposes the next. Continuing to patch one over-broad artifact does not converge. The sanctioned way forward is to **split it into narrower artifacts**, recorded by a human:
+
+```bash
+# 1. an agent (or the human) may PREPARE the request — it writes no gate state
+python3 "$SDP_SCRIPTS/review_gate.py" --cwd "$PWD" prepare-split "<parent>" \
+  --split-child "<narrower-1>" --split-child "<narrower-2>" \
+  --split-rationale "<why the scope cannot converge>"
+# 2. a HUMAN records it at a terminal (TTY + ~/.sdp/marker.token + a typed phrase)
+#    using the command inside the request file. The agent never runs this.
+```
+
+On the codex side the prepare step is the MCP tool `sdp_prepare_split`; recording stays a human CLI action on both hosts.
+
+What a split is and is not:
+- The parent is **closed as `SPLIT`** — reviewing it afterwards returns `BLOCK: artifact was split; gate the children`. Its own BLOCK history is **kept**, so the decision stays auditable.
+- Each child starts its **own counter at 0**, with `SPLIT_CHILD_OF parent=<key> parent_round=<n> depth=<d>` seeded into its log. This is the point: the narrower artifact is a new piece of work, not a continuation.
+- It is **not a reset and not a bypass**. It is refused unless the artifact is halted, at least two distinct child artifacts exist on disk, none of them is the parent, a rationale is given, and the log shows **two or more distinct BLOCK reasons** — one reason repeated is an unfixed finding, which a narrower artifact does not cure.
+- The chain is capped by `${halt.split_depth_cap}` (default 2). Splitting has always reset the counter as a side effect, because state is keyed by artifact path; the cap is what stops "split until it passes".
+
 ### INFRA flag (REQ-M11)
 On INFRA_ERROR the gate writes a per-artifact `.infra_flag`. Stage 8 MERGE/PUSH stays refused while an infra flag exists (or while `doctor` exits non-zero); a clean `ALLOW:` clears it.
 

@@ -142,5 +142,39 @@ PY
 then ok "MCP refuses codex self-review (inversion enforced at the codex boundary)"
 else bad "MCP did NOT refuse codex self-review"; fi
 
+# The halt-recovery split is exposed to codex as PREPARE-ONLY (issue #4). Two
+# properties matter at this boundary: the tool exists, and its result can never
+# carry the record-split command an agent could scrape and run.
+if python3 - "$SDP_ROOT" <<'PY'
+import os, sys, tempfile
+sys.path.insert(0, f"{sys.argv[1]}/scripts")
+import sdp_mcp_server as s
+
+tools = {t["name"] for t in s._tools()}
+assert "sdp_prepare_split" in tools, tools
+schema = next(t for t in s._tools() if t["name"] == "sdp_prepare_split")["inputSchema"]
+assert schema["properties"]["children"]["minItems"] == 2, schema
+assert set(schema["required"]) == {"artifact_path", "children", "rationale"}, schema
+
+proj = tempfile.mkdtemp()
+os.makedirs(os.path.join(proj, ".sdp"), exist_ok=True)
+for name in ("plan.md", "a.md", "b.md"):
+    with open(os.path.join(proj, name), "w", encoding="utf-8") as fh:
+        fh.write("x\n")
+msg = {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+       "params": {"name": "sdp_prepare_split",
+                  "arguments": {"cwd": proj, "artifact_path": "plan.md",
+                                "children": ["a.md", "b.md"], "rationale": "too broad"}}}
+text = s._handle(msg)["result"]["content"][0]["text"]
+# An un-halted artifact is refused -- and the payload still carries no command.
+assert "status: REFUSED" in text, text
+assert "record-split" not in text, text
+# No gate log may exist: prepare is a restricted, state-free writer.
+gate = os.path.join(proj, ".private", "sdp-artifacts", "gate")
+assert not os.path.isdir(gate) or not any(f.endswith(".log") for f in os.listdir(gate)), os.listdir(gate)
+PY
+then ok "MCP exposes sdp_prepare_split as a redacted, state-free preparer"
+else bad "MCP sdp_prepare_split contract failed"; fi
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

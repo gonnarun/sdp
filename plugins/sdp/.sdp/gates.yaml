@@ -15,6 +15,10 @@ cadence:
 halt:
   max_block: 13                 # 12th review executes; 13th entry halts (D-07)
   pivot_cap: 2
+  split_depth_cap: 2         # halt-recovery split: chain depth an artifact may be
+                                # split to (0 = original). 2 allows original -> children ->
+                                # grandchildren and refuses the next. Uncapped, the split
+                                # path would be an unlimited counter reset.
   max_stall: 5                  # consecutive ESCALATION_STALLs before .halt (absent-key default is 5)
 require_checklist: false        # migrated-off-old-core projects set true
 # review_checklist_include: .sdp/project-rules.md   # OPTIONAL — set only if file exists

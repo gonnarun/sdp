@@ -23,6 +23,7 @@ test:
     mcp_server: "bash tests/mcp_server.sh"
     review_gate: "bash tests/review_gate.sh"
     gate_marker: "bash tests/gate_marker.sh"
+    gate_split: "bash tests/gate_split.sh"
     adapters: "bash tests/adapters.sh"
     config_safety: "bash tests/config_safety.sh"
     docs: "bash tests/docs.sh"
@@ -36,7 +37,7 @@ test:
     # every layer name here must have a matching test.commands.<name>.
     # Downstream projects add their own layers AND the matching commands.
     mandatory: [smoke, integration, bump, packaging]
-    risk_gated: [concurrency, mcp_server, review_gate, gate_marker]
+    risk_gated: [concurrency, mcp_server, review_gate, gate_marker, gate_split]
     supporting: [adapters, config_safety, docs, i18n, regression, run_segment, orca_dispatch, precompact, win_compat]
   db:
     isolation: dedicated_test_db

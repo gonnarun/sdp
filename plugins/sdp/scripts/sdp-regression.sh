@@ -160,6 +160,21 @@ check_project() {
       bad "gate weakened beyond the sanctioned envelope (escalate_from=$ef, max_block=$mb, marker_span=$ms; envelope is <=8 / <=13 / <=4)"
     fi
 
+    # 4c SPLIT DEPTH (issue #4). The halt-recovery split starts each child on a
+    # fresh counter, so the chain cap is the only thing between it and an unlimited
+    # reset. Lowering it is always allowed (stricter); raising it past the shipped 2
+    # needs the same declared relaxation the cadence scalars need, and 3 is the
+    # ceiling -- past that the "split until it passes" loop is back.
+    local sc sc_raw
+    sc_raw="$(cfgv "$gates" halt.split_depth_cap)"; sc="$(norm_int "$sc_raw" 2)"
+    if [ "$sc" -le 2 ]; then
+      ok "split depth cap at or below baseline (split_depth_cap=$sc<=2)"
+    elif [ -n "$ack" ] && [ "$sc" -le 3 ]; then
+      ok "split depth cap RELAXED within the sanctioned envelope, declared: split_depth_cap=$sc<=3 (relaxation_ack=$ack)"
+    else
+      bad "split depth cap weakened (split_depth_cap=$sc; baseline 2, declared envelope 3) — a deep split chain is an unlimited counter reset"
+    fi
+
     # 4b COMBINATION invariant. The three scalars above are independent, but the
     # property that matters is joint: with a wide span the required marker KIND is
     # fixed by each window's anchor parity, so ef=7/span=4/review_on=even (anchors

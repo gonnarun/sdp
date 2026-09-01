@@ -249,6 +249,17 @@ The marker is honor-plus-evidence: the gate checks roster cardinality, distinctn
 
 Running `record-marker` twice is safe and the **second marker wins**: both lines stay in the log as an audit trail, and only the last is consumed by the escalation check. `--marker-decision pivot` and `--marker-decision halt` change gate state and additionally require `--i-am-recording-a-state-changing-decision` and a typed confirmation phrase.
 
+### After a halt: report, or split
+
+A halt is terminal for that artifact. The gate prints the whole procedure in the halt body — an agent's only move is to **stop and report** (artifact path, halt reason, cumulative BLOCK count, last finding, resolved vs unresolved). `RESET` / `OVERRIDE` / `PIVOT_RESET` and `SDP_GATE_OVERRIDE` are human-only levers and an agent must not use them **or offer them as options**; team markers are not consulted at all once `.halt` exists.
+
+When the halt is really a **scope** problem — every round raises a different defect rather than the same one — the sanctioned recovery is to split the artifact:
+
+- `review_gate.py --cwd DIR prepare-split <parent> --split-child <a> --split-child <b> --split-rationale "<why>"` — writes a request file, touches no gate state. On codex this is the MCP tool `sdp_prepare_split`.
+- `review_gate.py --cwd DIR record-split <parent> --split-child … --i-am-recording-a-state-changing-decision` — closes the parent as `SPLIT` and seeds each child's log. Human-only: TTY, `~/.sdp/marker.token`, and a typed confirmation phrase.
+
+The parent keeps its BLOCK history and answers `BLOCK: artifact was split; gate the children` from then on; each child starts at round 0 with `SPLIT_CHILD_OF parent=<key> parent_round=<n> depth=<d>` in its log. A split is refused unless the artifact is halted, two or more child artifacts exist on disk, none is the parent, a rationale is given, and the log carries **two or more distinct BLOCK reasons** — one reason repeated is an unfixed finding, not an oversized artifact. `halt.split_depth_cap` (default 2) caps the chain: because gate state is keyed by artifact path, splitting has always restarted the counter as a side effect, and the cap is what keeps the sanctioned path from becoming "split until it passes".
+
 Gate state operations are an operator procedure — see [`docs/GATE_OPERATIONS.md`](docs/GATE_OPERATIONS.md).
 
 ---
