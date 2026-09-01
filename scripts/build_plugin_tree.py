@@ -7,19 +7,18 @@ lands once, in the canonical tree, instead of twice. Option A deletes this
 generator together with the root mirror at P12.
 
 Scope: ``scripts/``, ``skills/``, ``commands/``, ``hooks/``. ``core/`` is EXCLUDED from the
-mirror: the two ``core/`` trees are host-specialized on reviewer DIRECTION only
-(root/Claude host -> codex reviewer via ``review_gate.py``; plugin/codex host ->
-Claude reviewer via the MCP ``claude_review_gate``). The 3-state POLICY semantics
+mirror, but is NOT host-specialized: both hosts read the same core (Claude through
+``${CLAUDE_PLUGIN_ROOT}/core/SDP.md``, Codex through ``core/SDP.md`` from ``skills/``),
+so the two copies must stay byte-identical and reviewer-direction-neutral -- a
+direction written into them is inverted on one host, which is issue #3.
+``tests/docs.sh`` (xv) asserts the identity; the copies are hand-maintained here
+rather than generated only because ``core/`` predates this generator. The 3-state POLICY semantics
 (the INFRA_ERROR merge/push interlock, the escalate_from/max_block halt limits,
-and the sanctioned record-marker path) are reconciled to be identical across both
-trees (P6 step-0). ``tests/docs.sh`` guard (xi) BOUNDS the divergence -- it (a)
-pins those policy sentences in both trees, (b) requires each host's gate command
-block to name the OPPOSITE reviewer so an MCP-unavailable fallback cannot
-self-review, and (c) pins the per-file divergent-line count and requires every
-divergent line to be a reviewer-direction line, so an added contradiction trips
-it. It is a bound, not a proof of full equivalence. Full text-unification
-(dropping the direction divergence entirely) awaits the cross-provider gate and is
-deferred; mirroring today would clobber the direction specialization.
+and the sanctioned record-marker path) are pinned in both trees by ``tests/docs.sh``
+guard (xi-a), and the gate calls that DO name a reviewer live outside the core --
+the Codex skills and the READMEs, guarded by (xi-b). Mirroring ``core/`` through this
+generator would be sound now that the trees are identical; it is simply not wired
+up, and (xv) fails the moment they drift.
 
 Host divergence is explicit, never implicit:
 

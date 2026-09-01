@@ -56,7 +56,7 @@ The plan carries a **design section, inline by default**. **Promote** it to a st
 
 **Early design gate (only when promoted)**: run the gate on `design_{feature}.md` before writing the full plan, so a wrong design is caught early:
 
-> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+> **Reviewer = the model opposite the author.** In **Codex**: call the MCP tool `claude_review_gate`, or if it is unavailable the CLI **with `--reviewer claude`**. In **Claude Code**: run the CLI below exactly as written, **with no `--reviewer`** — its default (`codex`) is already the opposite of you. **The block below is the Claude Code form.** `core/` is shared by both hosts, so copying it unchanged on the Codex side selects the default (`codex`) and Codex reviews its own work; pinning `--reviewer codex` into it does the same thing one host over (see SDP.md "review gate").
 
 ```bash
 # $BASE_DIR and $DATE are recorded by sdp-anchor.sh in .sdp_runtime.env metadata; never source that file as shell code.
@@ -152,7 +152,7 @@ On ALLOW, start {implementation/reimplementation}.
 ### Run
 The gate's **arg1 is the review PROMPT** (the instruction the reviewer acts on); **arg2 is the artifact path** (its content is read size-capped, wrapped as untrusted data for the reviewer, and its path keys the gate state/log). Do NOT pass `@<artifact>` as arg1 — `@file` makes the gate load the prompt FROM that file, so the plan would become the instruction and the review dimensions would never reach the reviewer. Replace placeholders, then:
 
-> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+> **Reviewer = the model opposite the author.** In **Codex**: call the MCP tool `claude_review_gate`, or if it is unavailable the CLI **with `--reviewer claude`**. In **Claude Code**: run the CLI below exactly as written, **with no `--reviewer`** — its default (`codex`) is already the opposite of you. **The block below is the Claude Code form.** `core/` is shared by both hosts, so copying it unchanged on the Codex side selects the default (`codex`) and Codex reviews its own work; pinning `--reviewer codex` into it does the same thing one host over (see SDP.md "review gate").
 
 ```bash
 PLAN="$BASE_DIR/$DATE/plan_{feature}.md"   # values read from anchor metadata, never sourced; fix loop: fix_plan_{feature}_N.md

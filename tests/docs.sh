@@ -260,18 +260,15 @@ sys.exit(0)
 PY
 
 # ---- (xi) P6 step-0: core-tree reconciliation invariant --------------------
-# The two core/ trees may differ ONLY on reviewer-DIRECTION/invocation lines; the
-# 3-state POLICY must be identical. A presence-only check is insufficient (an added
-# contradiction would still pass), so this is enforced three ways:
+# The two core/ trees are now byte-identical and host-NEUTRAL: both hosts read the
+# same text, so a reviewer direction written into it is inverted on one of them --
+# that is issue #3. What remains here is enforced two ways:
 #   (a) the reconciled policy sentences are present in BOTH trees;
-#   (b) each host's gate CLI command block names the OPPOSITE reviewer, so an
-#       MCP-unavailable fallback cannot self-review (codex host must use --reviewer
-#       claude; Claude host --reviewer codex);
-#   (c) a divergence manifest pins the per-file divergent-line COUNT and requires
-#       every divergent line to carry a direction/invocation token -- an added
-#       contradiction either bumps a count or lacks a token, and trips this guard.
-# Full text-unification (removing the direction divergence entirely) awaits the
-# cross-provider gate and is deferred; this guard bounds the divergence until then.
+#   (b) the gate calls that DO name a reviewer live outside the core -- the Codex
+#       skills, which must pin --reviewer claude, and the READMEs, which must show
+#       both directions and no bare (codex-defaulting) example.
+#   (c) retired: the divergence manifest bounded a direction divergence that no
+#       longer exists. (xv) asserts the byte-identity directly.
 
 # (a) reconciled 3-state policy present in BOTH trees
 for f in core/Stage4_design_plan.md plugins/sdp/core/Stage4_design_plan.md core/Stage7_test_exec.md plugins/sdp/core/Stage7_test_exec.md; do
@@ -298,7 +295,7 @@ done
 # (b) reviewer direction. NOTE: the core is NOT per-host -- both hosts read
 # plugins/sdp/core (Claude via ${CLAUDE_PLUGIN_ROOT}/core/SDP.md in commands/*.md,
 # Codex via core/SDP.md from skills/*). A reviewer pinned there is inverted on one
-# of them, which is issue #3. The core is asserted host-neutral in (xiv) instead.
+# of them, which is issue #3. The core is asserted host-neutral in (xv) instead.
 # Codex-side skills invoke the gate too; their review calls must pin --reviewer claude.
 for f in plugins/sdp/skills/sdp/SKILL.md plugins/sdp/skills/batch-sdp/SKILL.md plugins/sdp/skills/worktree-dispatch/SKILL.md \
          skills/sdp/SKILL.md skills/batch-sdp/SKILL.md skills/worktree-dispatch/SKILL.md; do
@@ -320,7 +317,7 @@ for f in README.md plugins/sdp/README.md; do
 done
 
 # (c) divergence manifest retired: core/ and plugins/sdp/core/ are now byte-identical
-#     (host-neutral, issue #3). (xiv) asserts the identity directly.
+#     (host-neutral, issue #3). (xv) asserts the identity directly.
 
 # ---- (xiv) turn-conduct rule present in BOTH core trees --------------------
 # Issue #1: an agent can end a turn with a progress report while work remains.
@@ -463,9 +460,10 @@ for f in core/SDP.md plugins/sdp/core/SDP.md; do
   { [ "$nc" = "0" ] && [ "$na" = "1" ]; } \
     && ok "(xv) $f: Claude-side example is flag-free, codex-side fallback pins claude" \
     || bad "(xv) $f: reviewer examples wrong (--reviewer codex=$nc, --reviewer claude=$na; want 0/1)"
-  grep -qF 'Never pin `--reviewer` into a copied gate command' "$f" \
-    && ok "(xv) $f: states the never-pin rule" \
-    || bad "(xv) $f: lost the never-pin rule"
+  { grep -qF 'Never pin `--reviewer` into a gate command copied out of this shared core' "$f" \
+    && grep -qF 'which must pin `--reviewer claude`' "$f"; } \
+    && ok "(xv) $f: states the never-pin rule AND its one codex-side exception" \
+    || bad "(xv) $f: lost the never-pin rule, or states it absolutely (it would forbid the codex fallback)"
 done
 
 # Every stage that prints a copy-pasteable gate block restates who reviews.
@@ -474,6 +472,38 @@ for f in core/Stage4_design_plan.md core/Stage7_test_exec.md \
   grep -qF 'Reviewer = the model opposite the author' "$f" \
     && ok "(xv) $f: gate block carries the opposite-model reviewer rule" \
     || bad "(xv) $f: gate block missing the opposite-model reviewer rule"
+done
+
+# (xv-b) The unpinned block is the CLAUDE CODE form. Stating only "Codex uses the MCP
+# tool" leaves a codex worker whose MCP is down to copy that block, whose CLI default
+# (codex) is codex reviewing codex -- issue #3 mirrored. Every stage that names the
+# reviewer must therefore also name the codex-side CLI fallback, and must say the block
+# is host-specific rather than universal.
+for f in core/Stage4_design_plan.md core/Stage7_test_exec.md \
+         plugins/sdp/core/Stage4_design_plan.md plugins/sdp/core/Stage7_test_exec.md; do
+  { grep -qF 'the CLI **with `--reviewer claude`**' "$f" \
+    && grep -qF 'The block below is the Claude Code form' "$f"; } \
+    && ok "(xv-b) $f: names the codex-side CLI fallback and marks the block host-specific" \
+    || bad "(xv-b) $f: a codex worker without MCP would copy the unpinned Claude-side block"
+done
+
+# Stage 5 has no block of its own but does send the reader back to the gate; it must
+# carry the same direction rather than the MCP tool alone.
+for f in core/Stage5_implement.md plugins/sdp/core/Stage5_implement.md; do
+  grep -qF 'its CLI fallback there is `--reviewer claude`' "$f" \
+    && ok "(xv-b) $f: re-gate instruction names the codex-side CLI fallback" \
+    || bad "(xv-b) $f: re-gate instruction names the MCP tool only"
+done
+
+# The codex skills ship to the host that reads core/ in the wrong direction, so they
+# carry the warning explicitly -- the pin in their own fallback block is not enough,
+# because the hazard is a block copied from somewhere else.
+for f in skills/sdp/SKILL.md skills/batch-sdp/SKILL.md skills/worktree-dispatch/SKILL.md \
+         plugins/sdp/skills/sdp/SKILL.md plugins/sdp/skills/batch-sdp/SKILL.md \
+         plugins/sdp/skills/worktree-dispatch/SKILL.md; do
+  grep -qF 'issue #3 in the other direction' "$f" \
+    && ok "(xv-b) $f: warns against copying the shared core's Claude-side gate block" \
+    || bad "(xv-b) $f: no warning against copying the shared core's Claude-side gate block"
 done
 
 echo "-------- $PASS passed, $FAIL failed --------"

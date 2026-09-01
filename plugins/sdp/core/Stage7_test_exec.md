@@ -109,7 +109,7 @@ Authored by the Evaluator from the verdict; Stage 8 requires it as its first inp
 
 ## review-gate test-result review (mandatory on completion)
 
-When the result is **PASS or CONDITIONAL**, do not ask the user — review it with the gate. (A **FAIL** verdict auto-enters the fix loop instead — the fix-plan's own gate covers it — so the test-result gate is not run on FAIL.) Run the MCP tool `claude_review_gate` on the codex side, `scripts/review_gate.py` on the Claude Code side. **Do not embed gate logic — call the gate.**
+When the result is **PASS or CONDITIONAL**, do not ask the user — review it with the gate. (A **FAIL** verdict auto-enters the fix loop instead — the fix-plan's own gate covers it — so the test-result gate is not run on FAIL.) Run the MCP tool `claude_review_gate` on the codex side (CLI fallback there: `--reviewer claude`), `scripts/review_gate.py` with no `--reviewer` on the Claude Code side. **Do not embed gate logic — call the gate.**
 
 ### Summary block (print before running)
 ```markdown
@@ -128,7 +128,7 @@ On ALLOW, proceed to Stage 8.
 ### Run
 arg1 is the review PROMPT, arg2 is the artifact path. Do NOT pass `@<artifact>` as arg1 (`@file` loads the prompt FROM the file, so the result would become the instruction and the dimensions never reach the reviewer).
 
-> **Reviewer = the model opposite the author.** In **Codex**, call the MCP tool `claude_review_gate`. In **Claude Code**, run the CLI below **without** `--reviewer` — the CLI default (`codex`) is already the opposite of you. Never pin `--reviewer` into a copied command: the pinned value is wrong on the other host and collapses the gate into self-review (see SDP.md "review gate").
+> **Reviewer = the model opposite the author.** In **Codex**: call the MCP tool `claude_review_gate`, or if it is unavailable the CLI **with `--reviewer claude`**. In **Claude Code**: run the CLI below exactly as written, **with no `--reviewer`** — its default (`codex`) is already the opposite of you. **The block below is the Claude Code form.** `core/` is shared by both hosts, so copying it unchanged on the Codex side selects the default (`codex`) and Codex reviews its own work; pinning `--reviewer codex` into it does the same thing one host over (see SDP.md "review gate").
 
 ```bash
 RESULT="$BASE_DIR/$DATE/testresult_{feature}.md"   # values read from anchor metadata, never sourced; fix loop: testresult_{feature}_N.md

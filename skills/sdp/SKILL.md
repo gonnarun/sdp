@@ -29,6 +29,8 @@ If MCP is unavailable, run:
 python3 scripts/review_gate.py --cwd "$PWD" --reviewer claude "<review prompt>" "<artifact-path>"
 ```
 
+**`--reviewer claude` is not optional here.** The stage documents do carry the rule in prose, but their shell blocks stay bare. `core/` is shared by both hosts, so its gate examples are written in the Claude Code form — no `--reviewer`, because there the CLI default (`codex`) is already the opposite model. Copy one of those blocks unchanged on this host and the default makes Codex review Codex's own work, which is issue #3 in the other direction. On the Codex side the reviewer is always Claude: the MCP tool, or the CLI with `--reviewer claude` pinned.
+
 Interpretation:
 - `ALLOW:` means continue to the next SDP stage.
 - `BLOCK:` without `INFRA_ERROR` is a content block. Revise the artifact and rerun the same gate.
