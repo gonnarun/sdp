@@ -2791,24 +2791,31 @@ def _content_distinct(artifact: Path, children: list[Path]) -> tuple[bool, str]:
     import hashlib
 
     def digest(path: Path) -> tuple[str | None, str]:
-        # Round-2 codex review F3. Reads AT the cap, never past it, and an oversized
-        # or unreadable file is a REFUSAL rather than a silently skipped comparison:
+        # An oversized or unreadable file is a REFUSAL, never a skipped comparison:
         # hashing a prefix would call two different files identical, and skipping
         # would let an unreadable child through the one content check there is.
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            return None, f"{path.name} is unreadable ({exc.strerror or exc})"
-        if size > DEFAULT_MAX_ARTIFACT_BYTES:
-            return None, (
-                f"{path.name} is larger than the {DEFAULT_MAX_ARTIFACT_BYTES}-byte artifact "
-                "cap, so it cannot be compared"
-            )
+        #
+        # Round-3 codex review: every decision is taken from ONE descriptor. The
+        # earlier form stat()ed the path and then re-opened it, so a file that grew
+        # or was replaced in between was accepted on its prefix. fstat() on the open
+        # handle describes the bytes actually being read, and reading cap+1 catches
+        # a file that grew after the fstat as well -- the two checks together leave
+        # no window, rather than narrowing one.
         try:
             with open(path, "rb") as handle:
-                data = handle.read(DEFAULT_MAX_ARTIFACT_BYTES)
+                if os.fstat(handle.fileno()).st_size > DEFAULT_MAX_ARTIFACT_BYTES:
+                    return None, (
+                        f"{path.name} is larger than the {DEFAULT_MAX_ARTIFACT_BYTES}-byte "
+                        "artifact cap, so it cannot be compared"
+                    )
+                data = handle.read(DEFAULT_MAX_ARTIFACT_BYTES + 1)
         except OSError as exc:
             return None, f"{path.name} is unreadable ({exc.strerror or exc})"
+        if len(data) > DEFAULT_MAX_ARTIFACT_BYTES:
+            return None, (
+                f"{path.name} grew past the {DEFAULT_MAX_ARTIFACT_BYTES}-byte artifact cap "
+                "while it was being read, so it cannot be compared"
+            )
         return hashlib.sha256(data).hexdigest(), ""
 
     parent, why = digest(artifact)

@@ -483,6 +483,14 @@ printf '%s' "$out" | grep -q 'FAIL (8).*larger than the' \
   && ok "(K6) a child past the artifact cap is refused (a prefix hash would lie)" \
   || bad "(K6) an oversized child was compared by prefix"
 
+# Exactly cap+1 bytes: caught by the read length even if the size check passed.
+python3 -c "open('$M/edge.md','w').write('y' * 512001)"
+out="$(H --cwd "$M" prepare-split "$M/plan.md" --split-child "$M/edge.md" \
+        --split-child "$M/b.md" --split-rationale "two concerns" 2>&1)"
+printf '%s' "$out" | grep -q 'FAIL (8)' \
+  && ok "(K8) a child one byte past the cap is refused" \
+  || bad "(K8) a cap+1 child was compared"
+
 # An append failure mid-seed must leave the parent unsealed. (The retraction
 # itself cannot be observed here: the harness's append seam fails every call
 # after the budget, so the compensating append fails too -- which is the
