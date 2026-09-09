@@ -112,7 +112,7 @@ $sdp:precompact login-limit
 2. **`PreCompact`** — 방금 작성된 스냅샷을 해당 `session_id`에 묶는다. 같은 디렉토리의 다른 세션이 엉뚱한 스냅샷으로 재개하는 사고를 막는다.
 3. **`SessionStart`** (matcher `compact`) — compact 직후 스냅샷 경로와 재개 지시를 `additionalContext`로 주입하고, 마커를 지워 다음 사이클을 다시 무장한다.
 
-자동 compact 직후에는 호스트가 턴을 스스로 이어가므로 사용자 입력 없이 작업이 재개된다. 수동 `/compact`의 경우에는 주입된 컨텍스트가 다음 메시지에서 사용된다.
+자동 compact 직후에는 호스트가 턴을 스스로 이어간다. 단순 수동 `/compact`는 주입된 컨텍스트를 다음 메시지에서 사용한다. `$sdp:precompact`가 compact를 큐에 넣은 경우에는 그 메시지도 함께 큐에 넣는다. Codex는 로컬 슬래시 명령 실행 중에도 `tui-idle`을 true로 보고하므로, 분리된 waiter가 해당 세션 rollout의 새로운 `compacted` 다음 `task_complete` 수명주기를 확인한 뒤 메시지를 제출한다. 그 제출이 스냅샷 컨텍스트를 받는 `SessionStart(compact)` 턴을 시작한다.
 
 사용자가 켜기 전까지는 꺼져 있고, 미설정은 결코 켜진 것으로 간주하지 않는다.
 

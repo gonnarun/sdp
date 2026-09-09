@@ -68,14 +68,16 @@ Create a gitignored snapshot of current in-progress work before manual compact, 
    - Exit 0 means the compaction is **queued, not submitted**. Nothing is typed
      while this turn is running: text sent mid-turn is an interruption of the
      turn, not a new prompt. A detached waiter watches for an idle composer --
-     which ending this turn produces -- and submits `/compact` then. So end the
-     turn promptly: say the cycle is queued and stop. Do not print the resume
-     prompt as an instruction, and start no new work; the compaction lands as
-     soon as you stop.
-   - After it lands: `PreCompact` binds the snapshot to this session,
-     `SessionStart` injects the resume context, and because this cycle asked
-     for the compaction itself, the resume prompt is typed for you once the
-     composer is idle again.
+     which ending this turn produces -- and submits `/compact` then. A transient
+     Codex interactive-prompt state remains non-idle and is retried only within
+     the same bounded wait. So end the turn promptly: say the cycle is queued
+     and stop. Do not print the resume prompt as an instruction, and start no
+     new work; the compaction lands as soon as you stop.
+   - After it lands: `PreCompact` binds the snapshot to this session. On Codex,
+     `tui-idle` stays true during the local slash command, so the detached
+     waiter requires a new `compacted` -> `task_complete` lifecycle in this
+     session's rollout before it submits the resume prompt. That submission
+     starts the turn on which `SessionStart(compact)` injects the snapshot.
    - Exit non-zero means no terminal driver is bound to this session, or the
      pane did not resolve to exactly one live terminal.
      Do not retry, and never guess a terminal.
@@ -89,9 +91,9 @@ Create a gitignored snapshot of current in-progress work before manual compact, 
 ## Automation
 
 The plugin ships three hooks (`hooks/hooks.json`) that close the loop between
-compaction and the next prompt, so no snapshot is lost and no resume prompt has
-to be pasted by hand. They are host-native: no terminal driver and no
-`statusLine` is involved, so they work in any terminal.
+compaction and the next prompt, so no snapshot is lost. The hooks are
+host-native and need no `statusLine`; the optional terminal driver is what lets
+the command also submit `/compact` and the first post-compact message.
 
 | Hook | When | What it does |
 | --- | --- | --- |
@@ -99,9 +101,10 @@ to be pasted by hand. They are host-native: no terminal driver and no
 | `PreCompact` | just before compaction | Binds the snapshot this session wrote to this `session_id`, so a second session in the same directory cannot resume the wrong work. |
 | `SessionStart` (`compact`) | just after compaction | Injects the snapshot path and resume instructions as `additionalContext`, then clears the marker so the cycle can re-arm. |
 
-After an automatic compaction the host continues the turn on its own, so the
-injected context is acted on with no user input. After a manual `/compact` the
-host returns to the prompt and the same context is used on the next message.
+After an automatic compaction the host continues the turn on its own. A plain
+manual `/compact` returns to the prompt and uses the context on the next
+message. A compaction queued by this skill also queues that message; on Codex
+the waiter first observes the new compact lifecycle in the session rollout.
 
 Both hosts support these three events, with the same semantics, but they
 read different files: Claude Code auto-loads `hooks/hooks.json`, while Codex

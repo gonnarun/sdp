@@ -23,12 +23,12 @@ prompt by hand" into a closed loop:
                      cycle can re-arm.
 
 After an AUTO compact the agent loop continues on its own, so the injected
-context is acted on with no user input -- that is the automatic link between
-compaction and the next prompt. After a MANUAL ``/compact`` the host returns to
-the prompt, so the same context sits there until the user types anything.
-
-Deliberately host-native: no terminal driver, no ``statusLine`` (a plugin cannot
-ship one), no external process. Works in any terminal on either host.
+context is acted on with no user input. After a MANUAL ``/compact`` the host
+returns to the prompt. An optional terminal driver can close that second gap:
+on Codex its detached waiter observes the real ``compacted`` then
+``task_complete`` lifecycle in this session's rollout before it submits the
+first post-compact message. That message starts the turn on which
+``SessionStart(compact)`` injects the bound context.
 
 Fail-close: ``mode`` must be ``auto`` before a Stop is ever blocked. Unset is not
 auto. Every failure path exits 0 -- a broken hook must never wedge a session.
@@ -102,6 +102,11 @@ PANE_BINDING_MAX_AGE_SEC = 12 * 3600
 SELF_FIRE_INTENT_TTL_SEC = 5 * 60
 # How long to wait for the session to stop working before giving up on typing.
 INJECT_IDLE_TIMEOUT_MS = 120_000
+# Codex reports a slash-command compaction as TUI-idle even while the compact
+# task is running. Its rollout is the authoritative completion signal instead.
+# Keep this below the self-fire intent TTL after the first idle wait.
+CODEX_COMPACT_TIMEOUT_SEC = 120.0
+CODEX_COMPACT_POLL_SEC = 0.25
 
 RESUME_INJECT_PROMPT = (
     "Continue from the precompact snapshot named in the injected context. Read "
@@ -812,8 +817,6 @@ def _orca_json(args: list, timeout_sec: float = 10.0) -> object:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if done.returncode != 0:
-        return None
     try:
         return json.loads(done.stdout)
     except ValueError:
@@ -873,31 +876,130 @@ def wait_tui_idle(handle: str, timeout_ms: int = INJECT_IDLE_TIMEOUT_MS) -> bool
     # Outlive the wait the CLI was asked for; killing it early would report a
     # busy session as merely unreadable and, worse, cap the contract at the
     # subprocess default rather than the requested window.
-    data = _orca_json(
-        ["terminal", "wait", "--terminal", handle,
-         "--for", "tui-idle", "--timeout-ms", str(int(timeout_ms)), "--json"],
-        timeout_sec=(timeout_ms / 1000.0) + 15.0,
-    )
-    # Every one of these must be present and correct. Accepting a bare
-    # ``ok: true``, or a reply with no wait block, treats "I could not tell"
-    # as "idle" -- which is the one direction that types into a running turn.
-    if not isinstance(data, dict) or data.get("ok") is not True:
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        remaining_ms = max(1, int(remaining * 1000))
+        data = _orca_json(
+            ["terminal", "wait", "--terminal", handle,
+             "--for", "tui-idle", "--timeout-ms", str(remaining_ms), "--json"],
+            timeout_sec=remaining + 15.0,
+        )
+        # Every one of these must be present and correct. Accepting a bare
+        # ``ok: true``, or a reply with no wait block, treats "I could not tell"
+        # as "idle" -- which is the one direction that types into a running turn.
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            return False
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return False
+        wait = result.get("wait")
+        if not isinstance(wait, dict):
+            return False
+        if wait.get("condition") != "tui-idle" or wait.get("handle") != handle:
+            return False
+        if wait.get("satisfied") is True:
+            return True
+        # Orca can return this transient state immediately while Codex is
+        # changing turns. It is not idle and must never authorize a send, but
+        # it also must not collapse a bounded wait into an immediate give-up.
+        if wait.get("blockedReason") != "codex-interactive-prompt":
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(1.0, remaining))
+
+
+def codex_rollout_watermark(session_id: str) -> tuple[str, int] | None:
+    """Locate this Codex session's rollout and capture its current end.
+
+    A Codex slash command is not a model prompt. Orca therefore reports
+    ``tui-idle`` throughout ``/compact`` and cannot tell the detached waiter
+    when it is safe to submit the resume prompt. The rollout records the real
+    lifecycle. Exactly one regular file inside the passwd-owned Codex sessions
+    directory must match; ambiguity fails closed.
+    """
+    safe = _safe_session(session_id)
+    if not safe or safe != session_id:
+        return None
+    try:
+        root = (passwd_home() / ".codex" / "sessions").resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    matches = []
+    try:
+        candidates = root.glob("*/*/*/rollout-*-%s.jsonl" % safe)
+        for path in candidates:
+            if path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            st = resolved.stat()
+            if stat.S_ISREG(st.st_mode):
+                matches.append((resolved, st.st_size))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(matches) != 1:
+        return None
+    path, size = matches[0]
+    return str(path), size
+
+
+def wait_codex_compaction_complete(
+    path_text: str, offset: int, timeout_sec: float = CODEX_COMPACT_TIMEOUT_SEC
+) -> bool:
+    """Wait for a new Codex ``compacted`` lifecycle and its task completion."""
+    try:
+        path = Path(path_text)
+        if path.is_symlink() or not path.is_file() or offset < 0:
+            return False
+        stream = path.open("rb")
+    except (OSError, ValueError):
         return False
-    result = data.get("result")
-    if not isinstance(result, dict):
+
+    deadline = time.monotonic() + timeout_sec
+    pending = b""
+    saw_compacted = False
+    try:
+        if path.stat().st_size < offset:
+            return False
+        stream.seek(offset)
+        while time.monotonic() < deadline:
+            chunk = stream.read()
+            if chunk:
+                pending += chunk
+                lines = pending.split(b"\n")
+                pending = lines.pop()
+                for raw in lines:
+                    try:
+                        event = json.loads(raw)
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("type") == "compacted":
+                        saw_compacted = True
+                        continue
+                    payload = event.get("payload")
+                    if (
+                        saw_compacted
+                        and event.get("type") == "event_msg"
+                        and isinstance(payload, dict)
+                        and payload.get("type") == "task_complete"
+                    ):
+                        return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(CODEX_COMPACT_POLL_SEC, remaining))
+    except OSError:
         return False
-    wait = result.get("wait")
-    if not isinstance(wait, dict):
-        return False
-    if wait.get("condition") != "tui-idle":
-        return False
-    # The reply names the handle it is about, and it must be the one asked
-    # about. Measured on a real idle terminal: result.wait carries handle,
-    # condition, satisfied, status and exitCode. Requiring it stops a cached or
-    # malformed success for some other terminal reading as "this pane is idle".
-    if wait.get("handle") != handle:
-        return False
-    return wait.get("satisfied") is True
+    finally:
+        stream.close()
+    return False
 
 
 def driver_ready(pane_key: str = "") -> bool:
@@ -992,6 +1094,17 @@ def clear_self_fire_intent(session_id: str, nonce: str = "") -> None:
         os.unlink(intent_path(session_id))
     except OSError:
         pass
+
+
+def mark_resume_dispatching(session_id: str, nonce: str) -> bool:
+    """Tell ``hook_resume`` the detached Codex waiter owns the next send."""
+    if not peek_self_fire_intent(session_id, nonce):
+        return False
+    record = _read_json(intent_path(session_id))
+    if record.get("nonce") != nonce:
+        return False
+    record["resume_dispatching"] = True
+    return _write_json(intent_path(session_id), record)
 
 
 def pane_path(session_id: str) -> Path:
@@ -1427,8 +1540,37 @@ def cmd_inject(argv: list) -> int:
     send_handle = resolve_handle(pane_key)
     if not send_handle:
         return give_up()
+    # Codex does not run SessionStart(compact) until a following message starts,
+    # so that hook cannot itself create the message which wakes it. Capture the
+    # rollout end immediately before submitting /compact; only a later compact
+    # lifecycle may release the resume send. Claude has no Codex rollout and
+    # keeps the hook-owned fallback.
+    codex_watch = (
+        codex_rollout_watermark(require_intent)
+        if prompt == "/compact" and require_intent
+        else None
+    )
     if not send_text(send_handle, prompt):
         return give_up()
+
+    if codex_watch:
+        rollout, offset = codex_watch
+        if not wait_codex_compaction_complete(rollout, offset):
+            return give_up()
+        # A future host may run SessionStart immediately after compact. In that
+        # case it consumes the intent and owns the resume send; do not duplicate
+        # it. On current Codex the intent remains, and this waiter must wake the
+        # hook by submitting the first post-compact message itself.
+        if not peek_self_fire_intent(require_intent, nonce):
+            return 0
+        if not mark_resume_dispatching(require_intent, nonce):
+            return give_up()
+        resumed_handle = resolve_handle(pane_key)
+        if not resumed_handle or not wait_tui_idle(resumed_handle):
+            return give_up()
+        resumed_handle = resolve_handle(pane_key)
+        if not resumed_handle or not send_text(resumed_handle, RESUME_INJECT_PROMPT):
+            return give_up()
     return 0
 
 
@@ -1503,6 +1645,13 @@ def hook_resume(payload: object = None) -> int:
     if not isinstance(session_id, str) or not session_id:
         return 0
 
+    # The Codex waiter marks the intent immediately before it sends the message
+    # that caused this hook to run. Spawning here in that case would create a
+    # duplicate turn. A host that runs this hook first sees no mark and keeps
+    # the original hook-owned fallback.
+    intent_record = _read_json(intent_path(session_id))
+    resume_already_dispatching = intent_record.get("resume_dispatching") is True
+
     # Consume the intent on every entry, valid marker or not. Leaving it behind
     # arms an unrelated later compaction to fire a resume prompt into whatever
     # the session is doing by then.
@@ -1536,7 +1685,12 @@ def hook_resume(payload: object = None) -> int:
     # mode is deliberately not consulted: it governs detection, not consent to
     # this particular unattended cycle.
     trigger = marker.get("trigger")
-    if trigger == "manual" and intent_pane and driver_ready(intent_pane):
+    if (
+        trigger == "manual"
+        and intent_pane
+        and not resume_already_dispatching
+        and driver_ready(intent_pane)
+    ):
         spawn_inject(intent_pane, RESUME_INJECT_PROMPT)
 
     json.dump(

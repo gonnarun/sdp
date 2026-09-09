@@ -906,6 +906,23 @@ PY
 # not evidence the agent stopped -- typing on it steers the turn in progress.
 # Judged on the JSON, because a timeout is ok:false and the exit status is not
 # a dependable stand-in for that across hosts.
+python3 - <<'PY' && ok "Orca JSON survives a non-zero CLI exit" || bad "structured wait state is discarded on non-zero exit"
+import json, pathlib, sys
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+
+class Done:
+    returncode = 1
+    stdout = json.dumps({"ok": True, "result": {"wait": {
+        "handle": "term_1", "condition": "tui-idle", "satisfied": False,
+        "blockedReason": "codex-interactive-prompt"}}})
+h.driver_argv = lambda args: ["/trusted/orca", *args]
+h.subprocess.run = lambda *args, **kwargs: Done()
+data = h._orca_json(["terminal", "wait"])
+sys.exit(0 if data.get("result", {}).get("wait", {}).get("blockedReason") ==
+         "codex-interactive-prompt" else 1)
+PY
+
 python3 - <<'PY' && ok "idle is decided by the driver's wait condition, on its JSON" || bad "idle detection does not follow the wait contract"
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
@@ -932,6 +949,24 @@ if calls and "--json" not in calls[-1]:
 if (fake.timeout_sec or 0) <= h.INJECT_IDLE_TIMEOUT_MS / 1000.0:
     problems.append("subprocess timeout %r does not outlast the requested wait"
                     % (fake.timeout_sec,))
+# Orca can report a transient Codex prompt immediately instead of blocking for
+# the requested duration. It remains non-idle, but the bounded wait must stay
+# alive and accept only a later explicit idle result.
+replies = [
+    {"ok": True, "result": {"wait": {"handle": "term_1",
+      "condition": "tui-idle", "satisfied": False,
+      "blockedReason": "codex-interactive-prompt"}}},
+    {"ok": True, "result": {"wait": {"handle": "term_1",
+      "condition": "tui-idle", "satisfied": True}}},
+]
+def sequence(args, timeout_sec=None):
+    calls.append(args)
+    return replies.pop(0)
+h._orca_json = sequence
+h.time.sleep = lambda seconds: None
+if h.wait_tui_idle("term_1", 1000) is not True or replies:
+    problems.append("a transient interactive prompt was not retried to explicit idle")
+h._orca_json = fake
 fake.reply = {"ok": True, "result": {}}
 if h.wait_tui_idle("term_1") is not False:
     problems.append("a reply with no wait block was treated as idle")
@@ -960,6 +995,47 @@ if h.wait_tui_idle("term_1") is not False:
     problems.append("an unreadable reply was treated as idle")
 if h.wait_tui_idle("") is not False:
     problems.append("an empty handle was treated as idle")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Codex's tui-idle signal stays true while a local slash command is compacting.
+# The waiter therefore needs a new compacted -> task_complete lifecycle from
+# this exact session rollout, not a screen guess or an old compact record.
+python3 - <<'PY' && ok "Codex compact completion is tied to a new rollout lifecycle" || bad "Codex compact completion detection is wrong"
+import json, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+
+home = pathlib.Path(tempfile.mkdtemp())
+rollout_dir = home / ".codex" / "sessions" / "2026" / "09" / "09"
+rollout_dir.mkdir(parents=True)
+sid = "01a0-test-session"
+rollout = rollout_dir / ("rollout-now-" + sid + ".jsonl")
+old = [
+    {"type": "compacted"},
+    {"type": "event_msg", "payload": {"type": "task_complete"}},
+]
+rollout.write_text("".join(json.dumps(x) + "\n" for x in old))
+h.passwd_home = lambda: home
+problems = []
+mark = h.codex_rollout_watermark(sid)
+if mark != (str(rollout.resolve()), rollout.stat().st_size):
+    problems.append("watermark mismatch: %r" % (mark,))
+offset = rollout.stat().st_size
+with rollout.open("a") as f:
+    f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+if h.wait_codex_compaction_complete(str(rollout), offset, 0.01):
+    problems.append("task_complete without a new compacted event was accepted")
+with rollout.open("a") as f:
+    f.write(json.dumps({"type": "compacted"}) + "\n")
+    f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+if not h.wait_codex_compaction_complete(str(rollout), offset, 0.1):
+    problems.append("new compacted -> task_complete lifecycle was missed")
+(rollout_dir / ("rollout-other-" + sid + ".jsonl")).write_text("")
+if h.codex_rollout_watermark(sid) is not None:
+    problems.append("ambiguous rollout match was accepted")
 for m in problems:
     sys.stderr.write("  " + m + "\n")
 sys.exit(1 if problems else 0)
@@ -998,6 +1074,30 @@ if any(o.startswith("send") for o in order):
 for m in problems:
     sys.stderr.write("  " + m + "\n")
 sys.exit(1 if problems else 0)
+PY
+
+python3 - <<'PY' && ok "the Codex waiter resumes only after compact task completion" || bad "the Codex waiter does not close the post-compact gap"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+order = []
+h.orca_bin = lambda: "orca"
+h.resolve_handle = lambda pane: (order.append("resolve"), "term_1")[1]
+h.wait_tui_idle = lambda handle, timeout_ms=0: (order.append("idle"), True)[1]
+h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
+h.codex_rollout_watermark = lambda sid: ("/rollout", 77)
+h.wait_codex_compaction_complete = lambda path, offset, timeout_sec=h.CODEX_COMPACT_TIMEOUT_SEC: (order.append("compacted"), True)[1]
+h.mark_resume_dispatching = lambda sid, nonce: (order.append("marked"), True)[1]
+h.send_text = lambda handle, text: (order.append("send:" + text), True)[1]
+h.clear_self_fire_intent = lambda sid, nonce="": order.append("clear")
+h.cmd_inject(["tab:leaf", "/compact", "sid", "n1"])
+want = [
+    "resolve", "idle", "resolve", "send:/compact", "compacted", "marked",
+    "resolve", "idle", "resolve", "send:" + h.RESUME_INJECT_PROMPT,
+]
+if order != want:
+    sys.stderr.write("  ordering %r, want %r\n" % (order, want))
+    raise SystemExit(1)
 PY
 
 # Every give-up path in the compact waiter must release its own intent, and
@@ -1239,6 +1339,40 @@ if h.take_self_fire_intent("i2") != "":
 for p in problems:
     sys.stderr.write("  " + p + "\n")
 sys.exit(1 if problems else 0)
+PY
+
+# On Codex the detached waiter submits the first post-compact message. The
+# SessionStart hook runs because of that message and must inject context without
+# queuing the same message a second time.
+python3 - <<'PY' && ok "SessionStart suppresses a duplicate Codex resume send" || bad "SessionStart can double-send the Codex resume prompt"
+import contextlib, io, os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+snapshot = tmp / "precompact_test.md"
+snapshot.write_text("snapshot")
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+sid = "resume-dispatch-test"
+nonce = h.set_self_fire_intent(sid, "tab:leaf", str(snapshot))
+h.mark_resume_dispatching(sid, nonce)
+h.write_marker(sid, {"state": "snapshotted", "trigger": "manual",
+                     "snapshot": str(snapshot)})
+sent = []
+h.driver_ready = lambda pane="": True
+h.spawn_inject = lambda *args: sent.append(args) or True
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    h.hook_resume({"session_id": sid, "source": "compact"})
+if sent:
+    sys.stderr.write("  duplicate sends: %r\n" % (sent,))
+    raise SystemExit(1)
+if "precompact_test.md" not in out.getvalue():
+    sys.stderr.write("  resume context missing\n")
+    raise SystemExit(1)
+if h.read_marker(sid) or h.peek_self_fire_intent(sid):
+    sys.stderr.write("  marker or intent not consumed\n")
+    raise SystemExit(1)
 PY
 
 # The suite drives `resume` against real session ids. On a machine that has a

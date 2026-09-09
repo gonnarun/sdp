@@ -116,9 +116,13 @@ has to be typed by hand:
    instructions as `additionalContext`, then clears the marker so the cycle
    re-arms.
 
-After an automatic compaction the host continues the turn on its own, so the work
-resumes with no user input. After a manual `/compact` the injected context is used
-on the next message instead.
+After an automatic compaction the host continues the turn on its own. A plain
+manual `/compact` uses the injected context on the next message. A compaction
+queued by `$sdp:precompact` also queues that message. On Codex, `tui-idle`
+remains true while the local slash command runs, so the detached waiter requires
+a new `compacted` then `task_complete` lifecycle in this session's rollout
+before submitting it; that submission starts the `SessionStart(compact)` turn
+which receives the snapshot context.
 
 It is off until each user turns it on, and an unset mode is never treated as on:
 
