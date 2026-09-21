@@ -54,11 +54,9 @@ cat > "$BIN/agy" <<STUB
 # invoked with --model <value> (never the silent no-op -m).
 : > "$CTRL/agy_argv"
 for a in "\$@"; do printf '[%s]\n' "\$a" >> "$CTRL/agy_argv"; done
-cat > "$CTRL/agy_stdin"
 case "\$(cat "$CTRL/agy_mode" 2>/dev/null || echo allow)" in
-  allow)     printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: agy ok"}}'; exit 0 ;;
-  block)     printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"BLOCK: agy no"}}'; exit 0 ;;
-  tool)      printf '%s\n' '{"event":"init","init":{}}' '{"event":"step_update","step_update":{"step_type":"tool","tool_name":"write_to_file"}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: tainted"}}'; exit 0 ;;
+  allow)     printf 'ALLOW: agy ok\n'; exit 0 ;;
+  block)     printf 'BLOCK: agy no\n'; exit 0 ;;
   malformed) printf 'thinking\n'; exit 0 ;;
   fail)      printf 'ALLOW: partial before fail\n'; exit 42 ;;
 esac
@@ -307,62 +305,6 @@ PY
 [ "$mcp_rev" = "claude" ] \
   && ok "directional: MCP claude_review_gate calls run_review(reviewer=claude)" \
   || bad "MCP entry did not default reviewer=claude (got $mcp_rev)"
-
-# Standalone agy mode is a PRIMARY review, never an infra fallback. Even with
-# require_primary_verdict=true it can ALLOW; Claude and Codex must not execute.
-APROJ="$TMP/agy-primary"; mkdir -p "$APROJ/.sdp"
-printf 'plan body\n' > "$APROJ/plan.md"
-printf 'require_primary_verdict: true\n' > "$APROJ/.sdp/gates.yaml"
-AGATE() { python3 "$HARNESS" --binary-resolver "$RESOLVER" -- --cwd "$APROJ" --reviewer agy "review" plan.md; }
-: > "$CTRL/claude_argv"; : > "$CTRL/codex_argv"; : > "$CTRL/agy_argv"
-setmode block allow; setcodex block
-out="$(AGATE)"; rc=$?
-{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW: agy ok' \
-   && ! printf '%s' "$out" | grep -q 'fallback' \
-   && [ -s "$CTRL/agy_argv" ] && [ ! -s "$CTRL/claude_argv" ] \
-   && [ ! -s "$CTRL/codex_argv" ]; } \
-  && ok "agy-only ALLOW uses agy alone even with require_primary_verdict" \
-  || bad "agy-only ALLOW routed to another provider (rc=$rc $out)"
-setmode block block; : > "$CTRL/claude_argv"; : > "$CTRL/codex_argv"
-out="$(AGATE)"; rc=$?
-{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BLOCK: agy no' \
-   && [ ! -s "$CTRL/claude_argv" ] && [ ! -s "$CTRL/codex_argv" ]; } \
-  && ok "agy-only content BLOCK has no second reviewer" \
-  || bad "agy-only BLOCK routed to another provider (rc=$rc $out)"
-setmode allow fail; : > "$CTRL/claude_argv"; : > "$CTRL/codex_argv"
-out="$(AGATE)"; rc=$?
-{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BLOCK: INFRA_ERROR (agy:' \
-   && [ ! -s "$CTRL/claude_argv" ] && [ ! -s "$CTRL/codex_argv" ]; } \
-  && ok "agy-only failure fails closed without host-model fallback" \
-  || bad "agy-only failure invoked another provider (rc=$rc $out)"
-setmode allow tool; : > "$CTRL/claude_argv"; : > "$CTRL/codex_argv"
-out="$(AGATE)"; rc=$?
-{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BLOCK: INFRA_ERROR (agy:' \
-   && [ ! -s "$CTRL/claude_argv" ] && [ ! -s "$CTRL/codex_argv" ]; } \
-  && ok "agy-only tool-use stream cannot return ALLOW or fall back" \
-  || bad "agy-only tool-use stream was accepted (rc=$rc $out)"
-python3 - "$CTRL/agy_argv" "$CTRL/agy_stdin" <<'PY' \
-  && ok "agy uses stream-json stdin, plan mode, and no prompt on argv" \
-  || bad "agy transport leaked prompt to argv or omitted stream-json"
-import json, sys
-argv = open(sys.argv[1], encoding="utf-8").read().splitlines()
-message = json.loads(open(sys.argv[2], encoding="utf-8").read())
-assert "[--input-format]" in argv and "[stream-json]" in argv
-assert "[--output-format]" in argv and "[--mode]" in argv and "[plan]" in argv
-assert "[-p]" not in argv and "[--print]" not in argv
-assert "plan body" not in "\n".join(argv)
-assert message["event"] == "user" and "plan body" in message["message"]["content"]
-PY
-python3 - "$APROJ/.private/sdp-artifacts/gate-audit.ndjson" <<'PY' \
-  && ok "agy-only audit records provider and verdict honestly" \
-  || bad "agy-only audit provider or verdict is wrong"
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
-assert [(r["provider"], r["verdict"]) for r in rows[-4:]] == [
-    ("agy", "ALLOW"), ("agy", "BLOCK"), ("none", "INFRA_ERROR"),
-    ("none", "INFRA_ERROR")
-]
-PY
 
 # ---------------- ADR-004 acceptance: N1 (REQ-032), deleted knobs, V7 --------
 # A legit stub at the fixture PASSWD home; an attacker fake at $HOME and via the

@@ -624,7 +624,8 @@ try:
     PROMPT = 'PROMPT-SENTINEL \uac00\ub098 spaces "quotes" & metachars'
     try:
         for adapter, tail in ((rg._codex_result, "-"),
-                              (rg._claude_result, "-p")):
+                              (rg._claude_result, "-p"),
+                              (rg._agy_result, "-p")):
             captured.clear()
             adapter(tmp, PROMPT, "", 5)
             nm = adapter.__name__
@@ -634,17 +635,6 @@ try:
                   "W9: %s hands the exact prompt to stdin_text" % nm)
             check(captured["argv"][-1] == tail,
                   "W9: %s argv ends with %r" % (nm, tail))
-        captured.clear()
-        rg._agy_result(tmp, PROMPT, "", 5)
-        argv = captured["argv"]
-        check(all(PROMPT not in a for a in argv),
-              "W9: _agy_result puts no prompt text in argv")
-        payload = json.loads(captured["stdin"])
-        check(payload == {"event": "user", "message": {"content": PROMPT}},
-              "W9: _agy_result sends the exact prompt in stream-json stdin")
-        check(argv[-6:] == ["--mode", "plan", "--input-format", "stream-json",
-                            "--output-format", "stream-json"] and "-p" not in argv,
-              "W9: _agy_result uses plan mode and stream-json without -p")
     finally:
         rg._trusted_binary, rg._run_argv = real_tb, real_ra
 

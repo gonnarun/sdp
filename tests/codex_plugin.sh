@@ -63,16 +63,6 @@ for skill in sdp batch-sdp worktree-dispatch; do
   grep -q 'review-gate' "$rf" && ok "Root $skill skill labels review gate" || bad "Root $skill skill missing review gate label"
 done
 
-# The shared plugin skill is discovered by Claude Code as /sdp:agy-review-gate
-# and by Codex as $sdp:agy-review-gate; both host payloads must be present.
-if [ -f "$PLUGIN/skills/agy-review-gate/SKILL.md" ] \
-   && grep -q '^name: agy-review-gate$' "$PLUGIN/skills/agy-review-gate/SKILL.md" \
-   && cmp -s "$PLUGIN/skills/agy-review-gate/SKILL.md" "skills/agy-review-gate/SKILL.md"; then
-  ok "agy-only review skill ships identically for Claude Code and Codex"
-else
-  bad "agy-only review skill missing or mirror differs"
-fi
-
 # shellcheck disable=SC2043  # single item today; kept as a loop for future utility skills
 for skill in precompact; do
   f="$PLUGIN/skills/$skill/SKILL.md"
