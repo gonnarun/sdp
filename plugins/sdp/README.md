@@ -25,12 +25,12 @@ SDP gives an agent session a fixed spine — eight numbered stages, two mandator
 |---|---|
 | **Host** | Claude Code with plugin support, and/or the `codex` CLI with plugin support |
 | **Python** | 3.9+ (standard library only — no pip installs) |
-| **Reviewer CLI** | The gate reviews with the model **opposite** the author, so the one you need is the one your host is *not*: on **Claude Code** you need `codex` (≥ 0.141.0) on `PATH`; on **Codex** you need `claude`. Using both hosts means installing both. Having only your own host's CLI leaves the gate with no reviewer and it fails closed to `INFRA_ERROR`. |
+| **Reviewer CLI** | Standard Stage gates use the model **opposite** the author: on **Claude Code** you need `codex` (≥ 0.141.0) on `PATH`; on **Codex** you need `claude`. The standalone `agy-review-gate` instead requires only `agy` (stream-json input support, ≥ 1.1.15). |
 | **git** | Required — `worktree-dispatch` creates worktrees |
-| **Optional** | `tmux` (long-lived batch engine), `agy` (fallback reviewer — see below) |
+| **Optional** | `tmux` (long-lived batch engine); `agy` for standard-gate fallback (required for the standalone agy-only skill) |
 | **To run the test suite** | `shellcheck` — the lint step is not skippable; see [Test](#test) |
 
-**About `agy`.** `agy` is an optional third-party multi-model reviewer CLI. When the primary reviewer hits an *infrastructure* failure (binary missing, timeout, empty or malformed output), the gate tries `agy` before failing closed. It is **not required**: with no `agy` installed the gate simply Fail-Closes to `BLOCK: INFRA_ERROR` instead, which is the safe outcome. A content `BLOCK:` from the primary reviewer is terminal and is *never* sent to `agy` for override.
+**About `agy`.** In standard Stage gates, `agy` is an optional fallback only after the primary reviewer hits an *infrastructure* failure; a content `BLOCK:` is never sent to `agy` for override. The separate `agy-review-gate` skill selects `agy` as its sole primary, so it requires `agy` and never calls Claude/Codex. Agy's model comes from the selected `gates.yaml` `model` key or agy's own default; choose an available non-Claude model there if working around a Claude quota.
 
 ---
 
@@ -63,7 +63,7 @@ codex plugin add sdp@sdp-marketplace
 
 `codex plugin marketplace add` also accepts a local path or an HTTPS/SSH Git URL, so `codex plugin marketplace add https://github.com/gonnarun/sdp.git` and `codex plugin marketplace add /path/to/a/clone` work too.
 
-Codex packaging lives in `plugins/sdp/.codex-plugin/plugin.json`, with a bundled MCP server in `plugins/sdp/.mcp.codex.json`. The Codex-side review gate is exposed as MCP tool `claude_review_gate`.
+Codex packaging lives in `plugins/sdp/.codex-plugin/plugin.json`, with a bundled MCP server in `plugins/sdp/.mcp.codex.json`. It exposes the standard Codex-side gate as `claude_review_gate` and the standalone agy-only gate as `agy_review_gate`.
 
 ### Restart the session
 
@@ -241,6 +241,10 @@ companion plugin (accelerator, optional)
 - **Read-only**: the reviewer runs `-s read-only` and cannot modify your repo.
 - **Prompt-injection resistant**: artifact content is wrapped as untrusted data, artifact paths are validated inside the workspace, the reviewer runs with an empty tool allowlist and no session persistence, and workspace-local reviewer binaries are rejected.
 
+### Standalone agy-only review
+
+The `agy-review-gate` skill runs **one review of one artifact** without Stages 1–8. Invoke `/sdp:agy-review-gate <artifact-path> <criteria>` in Claude Code or `$sdp:agy-review-gate <artifact-path> <criteria>` in Codex. Both use the bundled `agy_review_gate` MCP tool, or `review_gate.py --reviewer agy` when MCP is unavailable. In this explicit mode agy is the **sole** reviewer: Claude/Codex are never called, agy failure is `BLOCK: INFRA_ERROR`, and `require_primary_verdict: true` accepts an agy primary ALLOW. The ordinary Stage 4/7 cross-model gate is unchanged. The gate still records per-artifact state and audit; the skill does not edit the artifact or auto-retry.
+
 ### Escalation (default configuration)
 
 Rounds and kinds below are the **shipped default** — `escalate_from: 6`, `marker_span: 1`, `review_on: even`, `max_block: 13`. Both cadence keys are configurable; see [Configuration](#configuration).
@@ -355,13 +359,15 @@ Higher-risk changes add contract and e2e tiers. Destructive tests are Fail-Close
 The gate is intentionally decoupled. Any project — even one that never installs SDP — can drive the same review by calling `review_gate.py` directly:
 
 ```
-# --reviewer = the OPPOSITE model of whoever authored the artifact (CLI default is codex):
+# Directional gate: --reviewer = the OPPOSITE model (CLI default is codex):
 python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$PWD" --reviewer codex  "<review prompt>" "<artifact-path>"   # Claude-authored → codex reviews
 python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$PWD" --reviewer claude "<review prompt>" "<artifact-path>"   # codex-authored → Claude reviews
+# Explicit standalone gate: agy alone, no Claude/Codex primary or fallback:
+python3 "$SDP_ROOT/scripts/review_gate.py" --cwd "$PWD" --reviewer agy "<review prompt>" "<artifact-path>"
 # → first stdout line: ALLOW: ... | BLOCK: ...   exit 0 | 1
 ```
 
-`$SDP_ROOT` is the SDP checkout (the path is absolute so the fallback runs from any project cwd). The gate validates artifact paths inside the workspace, wraps artifact content as untrusted data, runs the selected reviewer first — `--reviewer` picks it (CLI default `codex`; pass `--reviewer claude` for codex-authored work), with agy as the fallback only on that reviewer's infra failure — with safe-mode/no-session-persistence/plan permissions and an empty tool allowlist, and rejects workspace-local reviewer binaries.
+`$SDP_ROOT` is the SDP checkout (the path is absolute so the fallback runs from any project cwd). The gate validates artifact paths inside the workspace, wraps artifact content as untrusted data, and rejects workspace-local reviewer binaries. The directional `codex`/`claude` modes use agy only on infrastructure failure; explicit `--reviewer agy` uses agy alone and fails closed if it is unavailable.
 
 ---
 

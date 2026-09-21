@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""SDP inverse (cross-model) review gate: the PRIMARY reviewer is the OPPOSITE of
-the author -- Claude-authored work is reviewed by codex, codex-authored work by
-Claude -- selected via ``reviewer``; agy is the fallback for both on infra failure.
+"""SDP review gate. Directional mode uses the author's opposite model as primary
+(codex for Claude, Claude for Codex), with agy on infrastructure failure only.
+Explicit ``reviewer=agy`` uses agy as the sole provider for either host.
 """
 
 from __future__ import annotations
@@ -606,11 +606,9 @@ def _run_argv(
     except OSError as exc:
         _cleanup_exec(tmpdir)
         return ProviderResult("infra", argv[0], "", "", f"spawn failed: {exc}")
-    # exec has succeeded; the running child holds the inode, so the hardlink is no
-    # longer needed and is removed now (rather than threading tmpdir through every
-    # later return path).
-    _cleanup_exec(tmpdir)
-
+    # Keep the pinned link until the child exits. agy can resolve its executable
+    # path after spawn; unlinking immediately SIGKILLs a real agy review on macOS.
+    # The link remains in a uid-only directory and is removed in finally.
     timed_out = False
     try:
         stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
@@ -627,6 +625,8 @@ def _run_argv(
                 stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
+    finally:
+        _cleanup_exec(tmpdir)
 
     if timed_out:
         return ProviderResult("infra", argv[0], "", stdout or "", "timeout", proc.returncode, True)
@@ -884,6 +884,39 @@ def _codex_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Pr
     return result
 
 
+def _extract_agy_stream(raw: str) -> str:
+    """Accept one successful, tool-free agy stream-json turn or fail closed."""
+    try:
+        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        if len(events) < 2 or any(not isinstance(event, dict) for event in events):
+            return ""
+        if events[0].get("event") != "init" or events[-1].get("event") != "result":
+            return ""
+        if sum(event.get("event") == "init" for event in events) != 1:
+            return ""
+        if sum(event.get("event") == "result" for event in events) != 1:
+            return ""
+        for event in events[1:-1]:
+            if event.get("event") != "step_update":
+                return ""
+            step = event.get("step_update")
+            if not isinstance(step, dict):
+                return ""
+            if step.get("step_type") not in ("user_input", "agent_response", "checkpoint"):
+                return ""
+            if "tool_info" in step or "subagent_info" in step:
+                return ""
+        result = events[-1].get("result")
+        if not isinstance(result, dict):
+            return ""
+        if result.get("status") != "SUCCESS" or result.get("num_turns") != 1:
+            return ""
+        response = result.get("response")
+        return response if isinstance(response, str) else ""
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+
+
 def _agy_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> ProviderResult:
     binary, reason = _trusted_binary("agy", root)
     if binary is None:
@@ -892,18 +925,24 @@ def _agy_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Prov
     if model_err:
         return ProviderResult("infra", "agy", "", "", model_err)
     max_output = DEFAULT_MAX_OUTPUT_BYTES   # ADR-004 D2 table: constant, never an env knob
-    argv = [str(binary), "--new-project"]
+    argv = [
+        str(binary), "--new-project", "--mode", "plan",
+        "--input-format", "stream-json", "--output-format", "stream-json",
+    ]
     # H3 (REQ-005): agy's model flag is `--model`, not `-m` (`-m` was a silent
     # no-op that fell back to the default model).
     if model:
         argv.extend(["--model", model])
-    # Prompt over stdin, not argv: `-p/--print` is documented as "useful for pipes"
-    # and --input-format defaults to text on both claude and agy. This keeps the
-    # artifact -- the largest untrusted input the gate handles -- off every command
-    # line, and off the 8191-character cmd.exe limit a Windows .cmd shim imposes.
-    argv.append("-p")
+    # agy 1.2.7 requires a value after -p; bare -p no longer reads stdin. Its
+    # documented stream-json input accepts a user event over stdin and keeps the
+    # untrusted artifact off argv. Only the terminal result.response may supply a
+    # verdict; any tool/subagent step or malformed stream fails closed.
+    stream_input = json.dumps(
+        {"event": "user", "message": {"content": prompt}}, ensure_ascii=False
+    ) + "\n"
     result = _run_argv(argv, cwd=root, timeout_s=timeout_s,
-                       max_output=max_output, stdin_text=prompt)
+                       max_output=max_output, stdin_text=stream_input,
+                       extract=_extract_agy_stream)
     result.provider = "agy"
     return result
 
@@ -2028,8 +2067,9 @@ def run_review(
 ) -> dict[str, Any]:
     # Directional (cross-model) gate: `reviewer` names the PRIMARY -- the OPPOSITE
     # of the author. "codex" (default) reviews Claude-authored work; "claude"
-    # reviews codex-authored work. agy is the fallback for both. Any other value
-    # falls back to the codex primary (fail toward the CLI default).
+    # reviews codex-authored work. "agy" is an explicit, sole-provider mode for
+    # either host; it never probes or falls back to claude/codex. The default
+    # directional gate keeps agy as an infrastructure-only fallback.
     import time
     root: Path | None = None
     artifact: Path | None = None
@@ -2320,10 +2360,15 @@ def run_review(
     # ---- L4 REVIEW (NO lock held; provider never runs under the state lock) ---
     # ADR-008: each provider gets min(configured, remaining budget - drain grace),
     # so primary + fallback + drain never exceed the single wall deadline.
-    # Directional: the PRIMARY is the OPPOSITE of the author. reviewer=="claude"
-    # reviews codex-authored work with claude; otherwise (the default) codex
-    # reviews Claude-authored work. agy is the fallback for BOTH directions.
-    if reviewer == "claude":
+    # Directional modes use the opposite model with agy as infrastructure fallback.
+    # Explicit agy mode uses agy directly and has NO second provider.
+    if reviewer == "agy":
+        primary_name = "agy"
+        primary = _agy_result(
+            root, full_prompt, raw_model,
+            max(1, min(agy_timeout, int(deadline - time.monotonic()) - GATE_DRAIN_GRACE)),
+        )
+    elif reviewer == "claude":
         primary_name = "claude"
         primary = _claude_result(
             root, full_prompt, raw_model,
@@ -2335,11 +2380,17 @@ def run_review(
             root, full_prompt, raw_model,
             max(1, min(codex_timeout, int(deadline - time.monotonic()) - GATE_DRAIN_GRACE)),
         )
+    fallback: ProviderResult | None = None
     if primary.status in {"allow", "block"}:
         final = primary
         provider = primary_name
         line = primary.line
         primary_error = ""
+    elif reviewer == "agy":
+        final = None
+        provider = "none"
+        line = f"BLOCK: INFRA_ERROR (agy: {primary.reason})"
+        primary_error = primary.reason
     else:
         fallback = _agy_result(
             root, full_prompt, raw_model,
@@ -2370,14 +2421,18 @@ def run_review(
             # final is None means NO REVIEW EXECUTED, so clearing would not
             # disprove the flag's proposition -- and since INFRA_ERROR is not in
             # stall_run's reset set, NOTIFY's run == 1 test could never re-arm.
-            if not _write_flag(paths["infra_flag"], f"{provider}: {primary.reason}\n"):
+            if not _write_flag(paths["infra_flag"], f"{primary_name}: {primary.reason}\n"):
                 raise InfraError("infra_flag write failed")
             _append_line(paths["log"], f"INFRA_ERROR {_now_z()}")
             result = {
                 "verdict": "INFRA_ERROR", "provider": provider, "line": line,
-                "output": "", "reason": f"{primary_name}: {primary.reason}; agy: {fallback.reason}",
+                "output": "", "reason": (
+                    f"{primary_name}: {primary.reason}; agy: {fallback.reason}"
+                    if fallback is not None else f"agy: {primary.reason}"
+                ),
                 "primary_error": primary_error, "exit_code": 1,
-                "timeout": primary.timed_out or fallback.timed_out, "round": count,
+                "timeout": primary.timed_out or (fallback.timed_out if fallback else False),
+                "round": count,
             }
         elif final.status == "block":
             new_count = count + 1
@@ -2401,7 +2456,7 @@ def run_review(
                 "output": final.output, "reason": final.reason, "primary_error": primary_error,
                 "exit_code": 1, "timeout": final.timed_out, "round": new_count,
             }
-        elif require_primary_verdict and provider == "agy":
+        elif require_primary_verdict and provider == "agy" and reviewer != "agy":
             # ADR-G17 / §4.5 Q11: the conversion sits in the ALLOW arm BEFORE the
             # ALLOW append, so NO `ALLOW` line is written for a refused fallback.
             # An agy BLOCK is unaffected, and the key defaults to false, so every
@@ -3494,11 +3549,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--reviewer",
-        choices=("codex", "claude"),
+        choices=("codex", "claude", "agy"),
         default="codex",
-        help="Primary reviewer -- the OPPOSITE of the author. codex reviews "
+        help="Primary reviewer. Directional mode uses the OPPOSITE of the author: codex reviews "
         "Claude-authored work (the CLI default: this is the Claude-Code-core "
-        "path); claude reviews codex-authored work. agy is the fallback for both.",
+        "path); claude reviews codex-authored work; agy reviews either host's "
+        "artifact as the sole provider when selected explicitly.",
     )
     # ADR-G01: the two verbs are MAGIC POSITIONALS reusing the existing pair,
     # mirroring `doctor`. argparse subparsers were rejected because every existing

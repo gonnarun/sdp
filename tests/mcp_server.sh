@@ -22,7 +22,8 @@ chmod +x "$BIN/claude"
 cat > "$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && { echo "agy stub"; exit 0; }
-printf 'ALLOW: mcp agy ok\n'
+cat >/dev/null
+printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: mcp agy ok\n"}}'
 STUB
 chmod +x "$BIN/agy"
 
@@ -86,6 +87,8 @@ assert init["result"]["serverInfo"]["name"] == "sdp-review-gate", init
 send_jsonl({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
 tools = recv_jsonl()["result"]["tools"]
 assert any(t["name"] == "claude_review_gate" for t in tools), tools
+agy_tool = next(t for t in tools if t["name"] == "agy_review_gate")
+assert "reviewer" not in agy_tool["inputSchema"]["properties"], agy_tool
 
 proc.stdin.write(b'{"jsonrpc":"2.0","id":99,"method":}\n')
 proc.stdin.flush()
@@ -112,6 +115,21 @@ assert text.startswith("ALLOW: mcp claude ok"), text
 audit = os.path.join(proj, ".private", "sdp-artifacts", "gate-audit.ndjson")
 row = json.loads(open(audit, encoding="utf-8").read().splitlines()[-1])
 assert row["config_source"] == os.path.realpath(os.path.join(os.environ["XDG_CONFIG_HOME"], "sdp", "gates.yaml")), row
+
+send({
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "tools/call",
+    "params": {
+        "name": "agy_review_gate",
+        "arguments": {"cwd": proj, "prompt": "review", "artifact_path": "plan.md"},
+    },
+})
+agy_call = recv()["result"]
+assert agy_call["isError"] is False, agy_call
+assert agy_call["content"][0]["text"].startswith("ALLOW: mcp agy ok"), agy_call
+agy_row = json.loads(open(audit, encoding="utf-8").read().splitlines()[-1])
+assert agy_row["provider"] == "agy" and agy_row["verdict"] == "ALLOW", agy_row
 
 proc.stdin.close()
 proc.wait(timeout=5)

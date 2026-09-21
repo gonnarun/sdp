@@ -187,6 +187,25 @@ def _tools() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "name": "agy_review_gate",
+            "description": (
+                "Run one SDP artifact review with agy as the sole provider. "
+                "Available in both Codex and Claude Code; never invokes either "
+                "host model and never falls back to another reviewer. "
+                "ALLOW/BLOCK/INFRA_ERROR are returned as data."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["prompt", "artifact_path"],
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "artifact_path": {"type": "string"},
+                    "cwd": {"type": "string"},
+                },
+            },
+        },
     ]
 
 
@@ -268,7 +287,7 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         ])
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
-    if name != "claude_review_gate":
+    if name not in ("claude_review_gate", "agy_review_gate"):
         return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
 
     prompt = args.get("prompt")
@@ -280,18 +299,25 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     # cwd reached run_review and surfaced a raw TypeError as the operator reason.
     if cwd is not None and not isinstance(cwd, str):
         return {"content": [{"type": "text", "text": "cwd must be a string"}], "isError": True}
-    # Directional: this MCP tool runs INSIDE codex (codex-authored work), so the
-    # author identity IS known at this boundary -- it is codex. The PRIMARY reviewer
-    # must therefore be the OPPOSITE model, Claude Code. `reviewer` defaults to
-    # "claude"; agy remains the shared infra fallback.
-    reviewer = args.get("reviewer", "claude")
-    if reviewer not in ("codex", "claude"):
-        return {"content": [{"type": "text", "text": "reviewer must be 'codex' or 'claude'"}], "isError": True}
+    # The legacy claude_review_gate entry is Codex-authored and must use Claude
+    # as primary. The separate agy_review_gate entry serves BOTH hosts and pins
+    # agy as its sole provider, without a caller-controlled reviewer field.
+    if name == "agy_review_gate":
+        if "reviewer" in args:
+            return {
+                "content": [{"type": "text", "text": "BLOCK: INFRA_ERROR (agy_review_gate does not accept reviewer overrides)"}],
+                "isError": False,
+            }
+        reviewer = "agy"
+    else:
+        reviewer = args.get("reviewer", "claude")
+        if reviewer not in ("codex", "claude"):
+            return {"content": [{"type": "text", "text": "reviewer must be 'codex' or 'claude'"}], "isError": True}
     # ENFORCE same-model exclusion at the one boundary where the author is known.
     # This tool is the codex-authored entry point, so reviewer="codex" would be
     # self-review. Refuse it as data (fail-closed) rather than trust the caller not
     # to ask for it -- the inversion is enforced here, not left to a default.
-    if reviewer == "codex":
+    if name == "claude_review_gate" and reviewer == "codex":
         return {
             "content": [{"type": "text", "text": (
                 "BLOCK: INFRA_ERROR (self-review refused: this codex-side gate cannot "
@@ -340,7 +366,8 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
-                    "Use claude_review_gate for SDP plan/test gates. It returns ALLOW/BLOCK/INFRA_ERROR as data. "
+                    "Use claude_review_gate for standard SDP plan/test gates and agy_review_gate "
+                    "for explicit agy-only reviews. Both return ALLOW/BLOCK/INFRA_ERROR as data. "
                     "Do not treat BLOCK as MCP transport failure."
                 ),
             },

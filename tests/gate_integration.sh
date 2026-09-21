@@ -30,7 +30,7 @@ set_claude_verdict "BLOCK: same reason"
 # (T27) had no way to produce an agy-fallback ALLOW. Mirror set_claude_verdict.
 AGYV="$TMP/agy_verdict.txt"
 set_agy_verdict() {   # $1 = stub stdout (verdict), $2 = exit code (default 0)
-  printf '%s\n' "$1" > "$AGYV"
+  printf '{"event":"init","init":{}}\n{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"%s\\n"}}\n' "$1" > "$AGYV"
   printf '#!/usr/bin/env bash\n[ "${1:-}" = "--version" ] && { echo v; exit 0; }\ncat "%s"\nexit %s\n' "$AGYV" "${2:-0}" > "$BIN/agy"
   chmod +x "$BIN/agy"
 }
