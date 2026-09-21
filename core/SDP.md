@@ -302,7 +302,7 @@ On INFRA_ERROR the gate writes a per-artifact `.infra_flag`. Stage 8 MERGE/PUSH 
 - `SDP_GATE_OVERRIDE=<token>` (+ optional `SDP_GATE_OVERRIDE_REASON`) forces `ALLOW:` **only in attended mode** and **only if the value matches the out-of-band token file** at `~/.sdp/override.token` (human-provisioned). The home is resolved from the **password-DB entry** (getpwnam) — **not** from the `$HOME` env and **not** from `gates.yaml`/config — so neither a rogue `$HOME=/tmp/evil` nor an agent-controlled `CLAUDE_PROJECT_DIR` can redirect the token path (residual: a same-uid agent that can write the real `~/.sdp` is the trusted launcher's responsibility — pin unattended). It clears `.halt` and `.infra_flag`, logs `RESET` + `OVERRIDE`, and ALLOWs. Refused in unattended mode.
 
 ### Audit
-`scripts/review_gate.py` appends a local `gate-audit.ndjson` (unified schema: provider, verdict, artifact, key, round, reason, primary_error, timeout, config_source). An unauditable `ALLOW:` is converted to INFRA_ERROR (fail-closed).
+`scripts/review_gate.py` appends a local `gate-audit.ndjson` (unified schema: provider, verdict, artifact, key, round, reason, primary_error, timeout, config_source, artifact_bytes, artifact_sha256). `artifact_bytes`/`artifact_sha256` fingerprint the **raw input snapshot a content verdict was formed from** — the bytes read before decoding, which is not proof that any reviewer process consumed them — and are **null** on every row no verdict was formed from an artifact (sticky halt, escalation refusal, marker, shim, and a run where no provider returned a verdict). An unauditable `ALLOW:` is converted to INFRA_ERROR (fail-closed).
 
 ---
 

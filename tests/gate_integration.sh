@@ -30,7 +30,7 @@ set_claude_verdict "BLOCK: same reason"
 # (T27) had no way to produce an agy-fallback ALLOW. Mirror set_claude_verdict.
 AGYV="$TMP/agy_verdict.txt"
 set_agy_verdict() {   # $1 = stub stdout (verdict), $2 = exit code (default 0)
-  printf '%s\n' "$1" > "$AGYV"
+  printf '{"event":"init","init":{}}\n{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"%s\\n"}}\n' "$1" > "$AGYV"
   printf '#!/usr/bin/env bash\n[ "${1:-}" = "--version" ] && { echo v; exit 0; }\ncat "%s"\nexit %s\n' "$AGYV" "${2:-0}" > "$BIN/agy"
   chmod +x "$BIN/agy"
 }
@@ -55,6 +55,70 @@ else
   bad "anchor: gate-reported state path is wrong -- ABORTING (negatives would be vacuous)"
   echo "-------- $PASS passed, $FAIL failed --------"; exit 1
 fi
+
+# ---- the ledger fingerprints the INPUT SNAPSHOT BEHIND A VERDICT -------------
+# Size and digest only, never content, and captured BEFORE the provider runs. The
+# first cut re-read the file at record time, which binds a verdict to whatever the
+# path held afterwards -- so the stub below MUTATES the artifact while it is
+# "reviewing", and the row must still carry the original bytes. A test that reads
+# the expected bytes after the gate cannot see that defect.
+BEFORE_SHA="$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$PROJ/plan.md")"
+BEFORE_LEN="$(python3 -c "import sys,os;print(os.path.getsize(sys.argv[1]))" "$PROJ/plan.md")"
+printf '#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && { echo v; exit 0; }
+printf "MUTATED DURING REVIEW\n" >> "%s"
+printf "BLOCK: mutating reviewer\n"
+'   "$PROJ/plan.md" > "$BIN/claude"; chmod +x "$BIN/claude"
+GATE >/dev/null 2>&1
+set_claude_verdict "BLOCK: reason A"     # restore the normal stub for later cases
+python3 - "$AUD" "$BEFORE_SHA" "$BEFORE_LEN" "$PROJ/plan.md" <<'PY' && ok "the fingerprint is the verdict's input snapshot, not the file afterwards" || bad "artifact fingerprint is taken at the wrong moment or leaks content"
+import json, os, sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+row=rows[-1]; want_sha, want_len, path = sys.argv[2], int(sys.argv[3]), sys.argv[4]
+problems=[]
+if os.path.getsize(path) <= want_len:
+    problems.append("the stub did not actually mutate the artifact; the test proves nothing")
+if row.get("artifact_sha256") != want_sha:
+    problems.append("sha256 %r is not the pre-review digest" % (row.get("artifact_sha256"),))
+if row.get("artifact_bytes") != want_len:
+    problems.append("artifact_bytes %r != pre-review size %d" % (row.get("artifact_bytes"), want_len))
+if "MUTATED DURING REVIEW" in json.dumps(row) or "plan body" in json.dumps(row):
+    problems.append("the row carries artifact content")
+for m in problems: sys.stderr.write("  "+m+"\n")
+sys.exit(1 if problems else 0)
+PY
+# A row from a run where NO reviewer executed must carry null, even though the gate
+# itself read the artifact to build the prompt. Round-2 review: when both providers
+# fail before execution the verdict is provider="none", and a fingerprint there
+# would contradict the field's documented meaning and pollute the dataset it exists
+# to build. Driven with an EMPTY resolver so neither binary resolves.
+NOREV="$TMP/norev"; mkdir -p "$NOREV/.sdp"; printf 'plan body\n' > "$NOREV/plan.md"
+printf '{}\n' > "$TMP/empty-res.json"
+python3 "$HARNESS" --binary-resolver "$TMP/empty-res.json" --passwd-home "$HOMEFIX" -- \
+  --cwd "$NOREV" --reviewer claude "review" "$NOREV/plan.md" >/dev/null 2>&1
+python3 - "$NOREV/.private/sdp-artifacts/gate-audit.ndjson" <<'PY' && ok "a run with no executed reviewer records null fingerprints" || bad "a fingerprint was recorded although no reviewer ran"
+import json, sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+if not rows: sys.exit("no audit rows written")
+row=rows[-1]
+problems=[]
+if row.get("provider") in ("claude","codex","agy"):
+    problems.append("a reviewer actually ran (%r); the case proves nothing" % row.get("provider"))
+if row.get("artifact_bytes") is not None or row.get("artifact_sha256") is not None:
+    problems.append("provider=%r row carries fingerprint %r" % (row.get("provider"), row.get("artifact_bytes")))
+for m in problems: sys.stderr.write("  "+m+"\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Every other non-review row in the main ledger must be null too.
+python3 - "$AUD" <<'PY' && ok "rows from paths with no reviewer carry null fingerprints" || bad "a non-review row invented an artifact measurement"
+import json, sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+bad=[r for r in rows if r.get("provider") in ("none","human","override")
+     and (r.get("artifact_bytes") is not None or r.get("artifact_sha256") is not None)]
+for r in bad[:3]: sys.stderr.write("  %s row carries %r\n" % (r.get("verdict"), r.get("artifact_bytes")))
+sys.exit(1 if bad else 0)
+PY
 
 # ---- counter increments; max_block=3 halts on the 3rd BLOCK. DISTINCT reasons
 # ---- so the identical-twice (stuck) guard does not pre-empt max_block --------

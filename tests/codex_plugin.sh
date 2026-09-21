@@ -63,6 +63,21 @@ for skill in sdp batch-sdp worktree-dispatch; do
   grep -q 'review-gate' "$rf" && ok "Root $skill skill labels review gate" || bad "Root $skill skill missing review gate label"
 done
 
+# One shared standalone skill routes to the existing directional gate. It must
+# not expose agy as a primary reviewer or use Codex's MCP entry in Claude Code.
+GATE_SKILL="$PLUGIN/skills/review-gate/SKILL.md"
+if [ -f "$GATE_SKILL" ] \
+   && grep -q '^name: review-gate$' "$GATE_SKILL" \
+   && cmp -s "$GATE_SKILL" "skills/review-gate/SKILL.md" \
+   && grep -qF -- '--reviewer claude' "$GATE_SKILL" \
+   && grep -qF -- '--reviewer codex' "$GATE_SKILL" \
+   && grep -qF 'agy **only after primary-reviewer infrastructure failure**' "$GATE_SKILL" \
+   && ! grep -qF -- '--reviewer agy' "$GATE_SKILL"; then
+  ok "standalone review-gate skill keeps both hosts cross-model and agy fallback-only"
+else
+  bad "standalone review-gate skill is absent, divergent, or changes reviewer direction"
+fi
+
 # shellcheck disable=SC2043  # single item today; kept as a loop for future utility skills
 for skill in precompact; do
   f="$PLUGIN/skills/$skill/SKILL.md"

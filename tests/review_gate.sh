@@ -54,9 +54,11 @@ cat > "$BIN/agy" <<STUB
 # invoked with --model <value> (never the silent no-op -m).
 : > "$CTRL/agy_argv"
 for a in "\$@"; do printf '[%s]\n' "\$a" >> "$CTRL/agy_argv"; done
+cat > "$CTRL/agy_stdin"
 case "\$(cat "$CTRL/agy_mode" 2>/dev/null || echo allow)" in
-  allow)     printf 'ALLOW: agy ok\n'; exit 0 ;;
-  block)     printf 'BLOCK: agy no\n'; exit 0 ;;
+  allow)     printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: agy ok"}}'; exit 0 ;;
+  block)     printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"BLOCK: agy no"}}'; exit 0 ;;
+  tool)      printf '%s\n' '{"event":"init","init":{}}' '{"event":"step_update","step_update":{"step_type":"tool","tool_name":"write_to_file"}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: tainted"}}'; exit 0 ;;
   malformed) printf 'thinking\n'; exit 0 ;;
   fail)      printf 'ALLOW: partial before fail\n'; exit 42 ;;
 esac
@@ -305,6 +307,27 @@ PY
 [ "$mcp_rev" = "claude" ] \
   && ok "directional: MCP claude_review_gate calls run_review(reviewer=claude)" \
   || bad "MCP entry did not default reviewer=claude (got $mcp_rev)"
+
+# agy remains fallback-only. Its CLI protocol must be safe and compatible, and a
+# tool-tainted or malformed stream cannot supply an ALLOW verdict.
+setmode malformed tool
+out="$(GATE "review" plan.md)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BLOCK: INFRA_ERROR' \
+   && ! printf '%s' "$out" | grep -q 'tainted'; } \
+  && ok "agy fallback refuses tool-tainted stream" \
+  || bad "agy tool-tainted stream supplied a verdict (rc=$rc $out)"
+python3 - "$CTRL/agy_argv" "$CTRL/agy_stdin" <<'PY' \
+  && ok "agy fallback uses plan mode and stream-json stdin" \
+  || bad "agy fallback transport leaked prompt or omitted stream-json"
+import json, sys
+argv = open(sys.argv[1], encoding="utf-8").read().splitlines()
+message = json.loads(open(sys.argv[2], encoding="utf-8").read())
+assert "[--input-format]" in argv and "[stream-json]" in argv
+assert "[--output-format]" in argv and "[--mode]" in argv and "[plan]" in argv
+assert "[-p]" not in argv and "[--print]" not in argv
+assert "plan body" not in "\n".join(argv)
+assert message["event"] == "user" and "plan body" in message["message"]["content"]
+PY
 
 # ---------------- ADR-004 acceptance: N1 (REQ-032), deleted knobs, V7 --------
 # A legit stub at the fixture PASSWD home; an attacker fake at $HOME and via the

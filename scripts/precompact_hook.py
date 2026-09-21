@@ -30,6 +30,12 @@ on Codex its detached waiter observes the real ``compacted`` then
 first post-compact message. That message starts the turn on which
 ``SessionStart(compact)`` injects the bound context.
 
+A typed prompt is only half the contract: the driver reports input acceptance and
+submission as separate stages and exits 0 for both, so an Enter the host swallowed
+looks exactly like a delivered one. Every send here therefore requires the
+``turn_started`` stage, re-observes the same request once when it is missing, and
+never re-sends -- a prompt that may already be queued must not be typed twice.
+
 Fail-close: ``mode`` must be ``auto`` before a Stop is ever blocked. Unset is not
 auto. Every failure path exits 0 -- a broken hook must never wedge a session.
 
@@ -107,6 +113,27 @@ INJECT_IDLE_TIMEOUT_MS = 120_000
 # Keep this below the self-fire intent TTL after the first idle wait.
 CODEX_COMPACT_TIMEOUT_SEC = 120.0
 CODEX_COMPACT_POLL_SEC = 0.25
+# The driver separates INPUT ACCEPTANCE from SUBMISSION, and exits 0 for both.
+# A receipt that stops at ``input_accepted`` means the Enter may have been
+# swallowed and the text is sitting in the composer -- the exact failure a user
+# sees as "/compact appeared but nothing happened". Proof is the ``turn_started``
+# stage, observed for this long. The same request is then RE-OBSERVED once, never
+# re-sent: the driver's contract is "never resend on silence".
+SUBMIT_OBSERVE_SEC = 15
+SUBMIT_REOBSERVE_SEC = 15
+# The subprocess has to outlast the observation it asked for. Killing the driver
+# mid-observation turns a knowable answer into an ambiguous transport failure.
+SUBMIT_SUBPROCESS_SLACK_SEC = 10
+# Providers whose turn start the driver can observe. A target outside this set is
+# not an agent TUI at all -- on a plain shell "/compact" would run as a command --
+# so an unobservable provider is a WRONG TARGET, not merely an unproven send.
+AGENT_PROVIDERS = ("claude", "codex")
+# Submission outcomes. LEGACY is "no proof obtainable here", which is not the same
+# as proof of success and is recorded as itself.
+SEND_PROVEN = "proven"
+SEND_UNPROVEN = "unproven"
+SEND_REJECTED = "rejected"
+SEND_LEGACY = "legacy-unverified"
 
 RESUME_INJECT_PROMPT = (
     "Continue from the precompact snapshot named in the injected context. Read "
@@ -832,30 +859,187 @@ def resolve_handle(pane_key: str) -> str:
     return match_handle(terminals, pane_key)
 
 
-def send_text(handle: str, text: str) -> bool:
-    """Type text into a terminal and submit it.
+_SUBMIT_PROOF_SUPPORTED = None
 
-    ``--enter`` is not optional: without it the text lands in the input box and
-    sits there unsent, which reads as the feature silently doing nothing.
+
+def driver_proves_submission() -> bool:
+    """Whether this driver can be ASKED for submission proof, decided without typing.
+
+    Round-2 review F1: the first cut learned this from a refused send and then
+    retried without the flag. That reads a failure as proof that nothing was
+    typed, which the driver's contract nowhere guarantees -- a failure AFTER the
+    keystrokes landed would have retyped the prompt. The capability is a property
+    of the binary, so it is read from the binary: `terminal send --help` names its
+    own flags and types nothing anywhere. Cached, because it cannot change under
+    a running process.
     """
-    if not handle:
-        return False
-    argv = driver_argv(
-        ["terminal", "send", "--terminal", handle, "--text", text, "--enter"]
-    )
+    global _SUBMIT_PROOF_SUPPORTED
+    if _SUBMIT_PROOF_SUPPORTED is not None:
+        return _SUBMIT_PROOF_SUPPORTED
+    argv = driver_argv(["terminal", "send", "--help"])
     if not argv:
+        _SUBMIT_PROOF_SUPPORTED = False
         return False
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        # Unknown, not absent. Fail toward "cannot prove", which downgrades a send
+        # to unverified rather than inventing a proof.
+        _SUBMIT_PROOF_SUPPORTED = False
+        return False
+    _SUBMIT_PROOF_SUPPORTED = "--wait-submit" in ((done.stdout or "") + (done.stderr or ""))
+    return _SUBMIT_PROOF_SUPPORTED
+
+
+def _send_once(
+    handle: str, text: str, observe_sec: int, retry_request: str = ""
+) -> tuple[object, int]:
+    """One driver send (or one replay of an earlier one). Returns (json, rc).
+
+    ``retry_request`` replays the receipt of a request already accepted; it does
+    NOT type the text again. That is the only sanctioned way to learn whether a
+    prompt the driver could not prove has since started its turn.
+    """
+    args = ["terminal", "send", "--terminal", handle, "--text", text, "--enter", "--json"]
+    if observe_sec > 0:
+        args += ["--wait-submit", str(int(observe_sec))]
+    if retry_request:
+        args += ["--retry-request", retry_request]
+    argv = driver_argv(args)
+    if not argv:
+        return None, -1
     try:
         done = subprocess.run(
             argv,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=observe_sec + SUBMIT_SUBPROCESS_SLACK_SEC,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
+        return None, -1
+    try:
+        return json.loads(done.stdout), done.returncode
+    except ValueError:
+        return None, done.returncode
+
+
+def _receipt_fields(data: object) -> dict:
+    result = data.get("result") if isinstance(data, dict) else None
+    send = result.get("send") if isinstance(result, dict) else None
+    prompt = send.get("prompt") if isinstance(send, dict) else None
+    prompt = prompt if isinstance(prompt, dict) else {}
+    stages = prompt.get("stages")
+    warnings = result.get("warnings") if isinstance(result, dict) else None
+    return {
+        "accepted": (send or {}).get("accepted") if isinstance(send, dict) else None,
+        "stages": [s for s in stages if isinstance(s, str)] if isinstance(stages, list) else [],
+        "provider": prompt.get("provider") if isinstance(prompt.get("provider"), str) else "",
+        "observation": prompt.get("observation") if isinstance(prompt.get("observation"), str) else "",
+        "request_id": prompt.get("requestId") if isinstance(prompt.get("requestId"), str) else "",
+        "warnings": [w for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else [],
+    }
+
+
+def send_prompt(
+    handle: str, text: str, observe_sec: int = SUBMIT_OBSERVE_SEC
+) -> tuple[str, dict]:
+    """Type text into a terminal and establish whether it actually SUBMITTED.
+
+    ``--enter`` is not optional: without it the text lands in the input box and
+    sits there unsent. What this function adds is that ``--enter`` alone does not
+    prove the Enter took. The driver reports acceptance and submission as separate
+    stages and exits 0 for both, so the old ``returncode == 0`` test called a
+    stranded prompt a success -- the composer kept "/compact", nothing ran, and the
+    cycle died without a trace.
+
+    Outcomes, and why they are four and not two:
+
+    * ``SEND_PROVEN`` -- the receipt carries ``turn_started``.
+    * ``SEND_LEGACY`` -- an agent target whose turn start this driver cannot watch
+      (an older host). No proof is obtainable, so the caller proceeds, but the
+      record says unverified rather than success.
+    * ``SEND_REJECTED`` -- refused before any input, or a target that is not an
+      agent TUI at all. Nothing was typed.
+    * ``SEND_UNPROVEN`` -- accepted, not proven, including every ambiguous
+      failure. The text may be sitting in the composer. The caller must NOT send
+      it again; re-sending on silence is what double-submits.
+    """
+    info = {"provider": "", "observation": "", "stages": [], "request_id": "",
+            "warnings": [], "detail": ""}
+    if not handle:
+        info["detail"] = "no terminal handle"
+        return SEND_REJECTED, info
+
+    # Round-2 review F1: whether proof can be asked for is settled BEFORE any
+    # keystroke, so no failure is ever interpreted as "nothing was typed".
+    provable = driver_proves_submission()
+    data, rc = _send_once(handle, text, observe_sec if provable else 0)
+
+    # Round-2 review F2: missing evidence is never promoted. Only two facts can
+    # be read affirmatively -- a refusal the driver states (`accepted: false`),
+    # and a turn it observed (`turn_started`). Everything else is UNPROVEN, which
+    # stops the cycle and forbids a second send.
+    if not isinstance(data, dict):
+        info["detail"] = "no parseable receipt from the driver (rc=%s)" % rc
+        return SEND_UNPROVEN, info
+    fields = _receipt_fields(data)
+    info.update(fields)
+    if fields["accepted"] is False:
+        info["detail"] = "the driver refused the input; nothing was typed"
+        return SEND_REJECTED, info
+    if data.get("ok") is not True or fields["accepted"] is not True:
+        # A failure that names no acceptance says nothing about the keystrokes.
+        info["detail"] = "the driver reported no accepted input (rc=%s)" % rc
+        return SEND_UNPROVEN, info
+    if "turn_started" in fields["stages"]:
+        return SEND_PROVEN, info
+    if fields["provider"] not in AGENT_PROVIDERS:
+        # Not an agent TUI -- on a shell "/compact" is a command line, so this is
+        # the wrong target. It is UNPROVEN and not REJECTED because the input WAS
+        # accepted: something was typed there, and it must not be typed again.
+        info["detail"] = "target provider %r is not an agent TUI" % (fields["provider"],)
+        return SEND_UNPROVEN, info
+    if not provable or fields["observation"] == "unsupported":
+        # Affirmatively unobservable: an agent target on a host that cannot watch
+        # a turn start. Proceed, recorded as unverified -- never as proof.
+        info["detail"] = "this driver cannot observe submission; proceeding unverified"
+        return SEND_LEGACY, info
+    if fields["observation"] != "supported":
+        info["detail"] = "receipt carries no observation status"
+        return SEND_UNPROVEN, info
+
+    # Accepted but unproven on a driver that CAN prove it. Re-observe the same
+    # request once. This replays that receipt; it types nothing.
+    if fields["request_id"]:
+        again, _rc = _send_once(handle, text, SUBMIT_REOBSERVE_SEC, fields["request_id"])
+        if isinstance(again, dict):
+            second = _receipt_fields(again)
+            info.update(second)
+            # Round-3 review F2: the replay is judged by the SAME evidence rule as
+            # the first receipt. A replay that carries `turn_started` while stating
+            # `accepted: false` contradicts itself, and a contradiction proves
+            # nothing -- it must not become a stronger verdict than the receipt it
+            # replays. Acceptance itself is not re-demanded: the first receipt
+            # established it, and the replay need not restate it.
+            if (
+                again.get("ok") is True
+                and second["accepted"] is not False
+                and "turn_started" in second["stages"]
+            ):
+                return SEND_PROVEN, info
+    info["detail"] = "accepted, but no turn start was observed"
+    return SEND_UNPROVEN, info
+
+
+def send_text(handle: str, text: str) -> bool:
+    """Boolean wrapper for callers that only need go/no-go.
+
+    True means the turn started, or that this host cannot prove it either way.
+    Everything else -- stranded in the composer, refused, ambiguous -- is False.
+    """
+    status, _info = send_prompt(handle, text)
+    return status in (SEND_PROVEN, SEND_LEGACY)
 
 
 def wait_tui_idle(handle: str, timeout_ms: int = INJECT_IDLE_TIMEOUT_MS) -> bool:
@@ -1107,6 +1291,63 @@ def mark_resume_dispatching(session_id: str, nonce: str) -> bool:
     return _write_json(intent_path(session_id), record)
 
 
+def submit_path(session_id: str) -> Path:
+    return state_dir() / (_safe_session(session_id) + ".submit.json")
+
+
+def _clip(value: object, limit: int) -> str:
+    """One bounded, control-free line. Diagnostics must not grow without limit.
+
+    Round-3 review: "control-free" has to mean C1 as well as C0. `str.split()`
+    does not treat U+0080-U+009F as whitespace, so a warning written by another
+    process could carry a CSI byte straight through this record and into the
+    terminal that `doctor` prints to.
+    """
+    text = value if isinstance(value, str) else ""
+    flat = "".join(
+        " " if (ch < " " or "\x7f" <= ch <= "\x9f") else ch for ch in text
+    )
+    return " ".join(flat.split())[:limit]
+
+
+def note_submission(
+    session_id: str, nonce: str, prompt: str, status: str, info: dict,
+    disposition: str = "",
+) -> None:
+    """Leave a durable, bounded record of what a send actually established.
+
+    The defect this feature hit was invisible: the prompt sat in the composer,
+    every exit status was 0, and nothing anywhere said so. Rounds 1-2 of the
+    review add two constraints. Every field is CAPPED -- warnings are written by
+    another process and are not a place to store unbounded text. And the record
+    carries the DISPOSITION that was actually taken, because `doctor` must report
+    what happened rather than a sentence chosen at write time: an unproven send
+    may release the intent or keep it, and a legacy send proceeds.
+    """
+    if not session_id:
+        return
+    stages = info.get("stages")
+    stages = [s for s in stages if isinstance(s, str)][:6] if isinstance(stages, list) else []
+    warnings = info.get("warnings")
+    warnings = warnings if isinstance(warnings, list) else []
+    _write_json(
+        submit_path(session_id),
+        {
+            "at": time.time(),
+            "nonce": _clip(nonce, 64),
+            "prompt": _clip(prompt, 60),
+            "status": _clip(status, 32),
+            "disposition": _clip(disposition, 80),
+            "provider": _clip(info.get("provider"), 32),
+            "observation": _clip(info.get("observation"), 32),
+            "stages": [_clip(s, 32) for s in stages],
+            "request_id": _clip(info.get("request_id"), 64),
+            "detail": _clip(info.get("detail"), 200),
+            "warnings": [_clip(w, 200) for w in warnings[:2]],
+        },
+    )
+
+
 def pane_path(session_id: str) -> Path:
     return state_dir() / (_safe_session(session_id) + ".pane.json")
 
@@ -1193,7 +1434,7 @@ WINDOW_PRUNE_SEC = 7 * 24 * 3600
 # Files that sit beside a marker but are not one. doctor must not report
 # them as pending snapshot requests, and the prune has to reach them or
 # they accumulate one per session forever.
-SIDECAR_SUFFIXES = (".window.json", ".pane.json", ".selffire.json")
+SIDECAR_SUFFIXES = (".window.json", ".pane.json", ".selffire.json", ".submit.json")
 
 
 def sticky_window(session_id: str, inferred: int) -> int:
@@ -1248,6 +1489,17 @@ def _prune_windows() -> None:
 
 def read_marker(session_id: str) -> dict:
     return _read_json(marker_path(session_id))
+
+
+def marker_active(session_id: str) -> bool:
+    """Whether THIS session is mid-compaction right now.
+
+    Round-2 review F3: "a marker exists" is too weak to disarm a cycle on -- a
+    finished or abandoned one leaves a record behind. Only the two in-flight
+    states count as evidence that the compaction this waiter just asked for is
+    under way.
+    """
+    return read_marker(session_id).get("state") in ("pending", "snapshotted")
 
 
 def session_tag(session_id: str) -> str:
@@ -1550,8 +1802,45 @@ def cmd_inject(argv: list) -> int:
         if prompt == "/compact" and require_intent
         else None
     )
-    if not send_text(send_handle, prompt):
-        return give_up()
+    status, info = send_prompt(send_handle, prompt)
+    if status == SEND_LEGACY:
+        # Round-2 review F5: a send that proceeded WITHOUT proof is recorded too,
+        # or `doctor` reports only the cycles that stopped and none of the ones
+        # that continued on an unverifiable host.
+        note_submission(require_intent, nonce, prompt, status, info,
+                        "continued without proof (driver cannot observe)")
+    elif status != SEND_PROVEN:
+        # Failing to OBSERVE a submission is not evidence that it did not happen.
+        # A compaction that already started leaves an ACTIVE marker behind it, and
+        # disarming that cycle would strand work the host is already compacting.
+        #
+        # Round-3 review F1: there is ONE continuation point. Whichever read finds
+        # the marker, a kept cycle goes on to the rollout waiter when one is armed
+        # -- an earlier revision returned from the second branch and silently
+        # dropped the resume the waiter owns.
+        #
+        # Round-3 review F4: nothing claims a release before it happens. The
+        # record written ahead of `give_up()` says it was ATTEMPTED; only the one
+        # written afterwards says it was done. An interrupted waiter therefore
+        # leaves an honest record instead of asserting an action it never took.
+        kept = bool(require_intent) and marker_active(require_intent)
+        if not kept:
+            note_submission(require_intent, nonce, prompt, status, info,
+                            "intent release attempted: no sign the compaction started")
+            # Re-read after the write, the last moment before the release. A marker
+            # that appeared meanwhile means the compaction did start after all.
+            kept = bool(require_intent) and marker_active(require_intent)
+        if kept:
+            note_submission(require_intent, nonce, prompt, status, info,
+                            "intent kept: this cycle's compaction is under way")
+        else:
+            give_up()
+            note_submission(require_intent, nonce, prompt, status, info,
+                            "intent released: no sign the compaction started")
+            return 0
+        if not codex_watch:
+            return 0
+        # A kept cycle with an armed watcher falls through to it below.
 
     if codex_watch:
         rollout, offset = codex_watch
@@ -1569,7 +1858,15 @@ def cmd_inject(argv: list) -> int:
         if not resumed_handle or not wait_tui_idle(resumed_handle):
             return give_up()
         resumed_handle = resolve_handle(pane_key)
-        if not resumed_handle or not send_text(resumed_handle, RESUME_INJECT_PROMPT):
+        if not resumed_handle:
+            return give_up()
+        resume_status, resume_info = send_prompt(resumed_handle, RESUME_INJECT_PROMPT)
+        if resume_status == SEND_LEGACY:
+            note_submission(require_intent, nonce, RESUME_INJECT_PROMPT, resume_status,
+                            resume_info, "resume sent without proof")
+        elif resume_status != SEND_PROVEN:
+            note_submission(require_intent, nonce, RESUME_INJECT_PROMPT, resume_status,
+                            resume_info, "resume not confirmed; nothing was re-sent")
             return give_up()
     return 0
 
@@ -1725,6 +2022,38 @@ def cmd_doctor() -> int:
     out("config file       : %s%s\n" % (config_path(), "" if config_path().is_file() else "  (absent)"))
     out("threshold         : %.0f%%\n" % resolve_threshold())
     out("state dir         : %s\n" % state_dir())
+
+    # A send that was accepted but never proven to submit is the one failure this
+    # feature can hit while every exit status stays 0. It is reported here rather
+    # than left for the user to infer from a prompt stranded in the composer.
+    latest = None
+    try:
+        for entry in state_dir().iterdir():
+            if not entry.name.endswith(".submit.json"):
+                continue
+            record = _read_json(entry)
+            if not record or record.get("status") in ("", SEND_PROVEN):
+                continue
+            if latest is None or float(record.get("at") or 0) > float(latest.get("at") or 0):
+                latest = record
+    except OSError:
+        latest = None
+    if latest:
+        out("last send         : %s (%s) -- %s\n" % (
+            latest.get("status", "?"), latest.get("prompt", ""), latest.get("detail", "")))
+        # Round-2 review F5: print the disposition that was RECORDED, never a
+        # fixed sentence -- an unconfirmed send may have kept the cycle armed.
+        disposition = latest.get("disposition") or "disposition not recorded"
+        out("        %s\n" % disposition)
+        # Round-3/4 review F4: the advice follows that disposition, and NO
+        # disposition earns an unconditional re-run. Releasing the intent disarms
+        # the automatic resume; it does not cancel a prompt the driver already
+        # accepted, which may still be queued or running. Every path therefore
+        # ends at "look at the session first".
+        out("        Nothing was re-sent. The accepted prompt may still be queued\n")
+        out("        or running -- check the session before sending anything again.\n")
+        if disposition.startswith("intent released"):
+            out("        That cycle is disarmed: once the session is clear, re-run to retry.\n")
 
     if mode != "auto":
         out("FAIL  automatic detection is off. Enable it with:\n")

@@ -70,6 +70,12 @@ Create a gitignored snapshot of current in-progress work before manual compact, 
      waiter requires a new `compacted` -> `task_complete` lifecycle in this
      session's rollout before it submits the resume prompt. That submission
      starts the turn on which `SessionStart(compact)` injects the snapshot.
+   - The waiter does not treat a typed prompt as a submitted one. The driver
+     reports acceptance and submission as separate stages, so it requires the
+     `turn_started` stage, re-observes the same request once when that is
+     missing, and never retypes the prompt. A submission it cannot confirm
+     disarms that cycle and is recorded in the state directory; `doctor` reports
+     it. Re-run the command to retry.
    - Exit non-zero means no terminal driver is bound to this session, or the
      pane did not resolve to exactly one live terminal.
      Do not retry, and never guess a terminal.

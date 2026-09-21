@@ -22,7 +22,8 @@ chmod +x "$BIN/claude"
 cat > "$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && { echo "agy stub"; exit 0; }
-printf 'ALLOW: mcp agy ok\n'
+cat >/dev/null
+printf '%s\n' '{"event":"init","init":{}}' '{"event":"result","result":{"status":"SUCCESS","num_turns":1,"response":"ALLOW: mcp agy ok\n"}}'
 STUB
 chmod +x "$BIN/agy"
 

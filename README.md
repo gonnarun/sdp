@@ -220,6 +220,10 @@ companion plugin (accelerator, optional)
 - **Read-only**: the reviewer runs `-s read-only` and cannot modify your repo.
 - **Prompt-injection resistant**: artifact content is wrapped as untrusted data, artifact paths are validated inside the workspace, the reviewer runs with an empty tool allowlist and no session persistence, and workspace-local reviewer binaries are rejected.
 
+### Standalone review-gate skill
+
+Invoke `/sdp:review-gate <artifact-path> <criteria>` in Claude Code or `$sdp:review-gate <artifact-path> <criteria>` in Codex to review one artifact without running Stages 1–8. This skill calls the **same gate** as Stage 4/7: Claude-authored work goes to Codex, Codex-authored work goes to Claude. It never makes agy the primary reviewer; the existing gate may try agy only after primary-reviewer infrastructure failure, and a valid content `BLOCK:` is terminal. Gate state, configured limits, and `require_primary_verdict` still apply. The skill does not edit or retry the artifact.
+
 ### Escalation (default configuration)
 
 Rounds and kinds below are the **shipped default** — `escalate_from: 6`, `marker_span: 1`, `review_on: even`, `max_block: 13`. Both cadence keys are configurable; see [Configuration](#configuration).

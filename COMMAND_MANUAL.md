@@ -116,6 +116,10 @@ has to be typed by hand:
    instructions as `additionalContext`, then clears the marker so the cycle
    re-arms.
 
+A prompt this command types is only accepted as sent when the driver proves the
+turn started; an unconfirmed submission disarms that cycle, is never retyped, and
+is reported by `doctor`.
+
 After an automatic compaction the host continues the turn on its own. A plain
 manual `/compact` uses the injected context on the next message. A compaction
 queued by `$sdp:precompact` also queues that message. On Codex, `tui-idle`

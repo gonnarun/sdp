@@ -1051,7 +1051,8 @@ import precompact_hook as h
 order = []
 h.orca_bin = lambda: "orca"
 h.resolve_handle = lambda pane: (order.append("resolve"), "term_1")[1]
-h.send_text = lambda handle, text: (order.append("send:" + text), True)[1]
+h.send_prompt = lambda handle, text, observe_sec=0: (
+    order.append("send:" + text), (h.SEND_PROVEN, {}))[1]
 h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
 h.clear_self_fire_intent = lambda sid, nonce="": None
 problems = []
@@ -1088,7 +1089,8 @@ h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
 h.codex_rollout_watermark = lambda sid: ("/rollout", 77)
 h.wait_codex_compaction_complete = lambda path, offset, timeout_sec=h.CODEX_COMPACT_TIMEOUT_SEC: (order.append("compacted"), True)[1]
 h.mark_resume_dispatching = lambda sid, nonce: (order.append("marked"), True)[1]
-h.send_text = lambda handle, text: (order.append("send:" + text), True)[1]
+h.send_prompt = lambda handle, text, observe_sec=0: (
+    order.append("send:" + text), (h.SEND_PROVEN, {}))[1]
 h.clear_self_fire_intent = lambda sid, nonce="": order.append("clear")
 h.cmd_inject(["tab:leaf", "/compact", "sid", "n1"])
 want = [
@@ -1098,6 +1100,388 @@ want = [
 if order != want:
     sys.stderr.write("  ordering %r, want %r\n" % (order, want))
     raise SystemExit(1)
+PY
+
+# A typed prompt is not a submitted prompt. The driver reports acceptance and
+# submission as separate stages and exits 0 for both, so the old returncode test
+# called a prompt stranded in the composer a success -- which is exactly how
+# "/compact appeared but nothing ran" happened, silently.
+python3 - <<'PY' && ok "submission is decided by the turn_started stage, not the exit code" || bad "submission proof is not enforced"
+import json, sys, pathlib
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+problems = []
+h.driver_argv = lambda args: ["/trusted/orca", *args]
+
+def receipt(stages, provider="claude", observation="supported", ok=True,
+            accepted=True, request_id="req-1", warnings=None):
+    send = {"prompt": {"stages": stages, "provider": provider,
+                       "observation": observation, "requestId": request_id}}
+    if accepted is not None:
+        send["accepted"] = accepted
+    body = {"ok": ok, "result": {"send": send}}
+    if warnings:
+        body["result"]["warnings"] = warnings
+    return body
+
+class Runner:
+    """Answers the capability probe from the binary, then the sends in order."""
+    def __init__(self, replies, help_text="--enter --wait-submit --retry-request"):
+        self.replies = list(replies)
+        self.help_text = help_text
+        self.calls = []
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        runner = self
+        class Done:
+            returncode = 0
+            stdout = runner.help_text if "--help" in argv else json.dumps(runner.replies.pop(0))
+            stderr = ""
+        return Done()
+
+def fresh(replies, **kw):
+    h._SUBMIT_PROOF_SUPPORTED = None
+    r = Runner(replies, **kw)
+    h.subprocess.run = r
+    return r
+
+def sends(runner):
+    return [c for c in runner.calls if "--help" not in c]
+
+# The capability is settled from the binary, before anything is typed.
+r = fresh([receipt(["input_accepted", "turn_started"])])
+status, _info = h.send_prompt("term_1", "/compact")
+if status != h.SEND_PROVEN:
+    problems.append("a turn_started receipt was not PROVEN: %r" % (status,))
+if "--help" not in r.calls[0]:
+    problems.append("the capability was not probed before sending: %r" % (r.calls[0],))
+if "--wait-submit" not in sends(r)[0]:
+    problems.append("the send did not ask for submission proof")
+
+# Unproven, then proven by RE-OBSERVING the same request -- never a second send.
+r = fresh([receipt(["input_accepted"], warnings=["Enter may have been swallowed"]),
+           receipt(["input_accepted", "turn_started"])])
+status, info = h.send_prompt("term_1", "/compact")
+if status != h.SEND_PROVEN:
+    problems.append("re-observation did not prove a late turn start: %r" % (status,))
+second = sends(r)[1]
+if len(sends(r)) != 2 or "--retry-request" not in second:
+    problems.append("the second call was not a receipt replay: %r" % (sends(r),))
+elif second[second.index("--retry-request") + 1] != "req-1":
+    problems.append("the replay did not name the original request")
+
+# Still unproven: the text may be sitting in the composer, so this is a failure
+# and the caller must not send it again.
+r = fresh([receipt(["input_accepted"]), receipt(["input_accepted"])])
+status, info = h.send_prompt("term_1", "/compact")
+if status != h.SEND_UNPROVEN:
+    problems.append("an unobserved submission was not UNPROVEN: %r" % (status,))
+if len(sends(r)) != 2:
+    problems.append("an unproven send was retyped: %r sends" % (len(sends(r)),))
+if not info.get("detail"):
+    problems.append("no detail recorded for an unproven send")
+
+# A driver that cannot be asked for proof is asked for none, and its send is
+# recorded as unverified rather than as success.
+r = fresh([receipt(["input_accepted"], observation="unsupported")], help_text="--enter")
+status, _info = h.send_prompt("term_1", "/compact")
+if status != h.SEND_LEGACY:
+    problems.append("an unobservable host was not LEGACY: %r" % (status,))
+if any("--wait-submit" in c for c in sends(r)):
+    problems.append("proof was requested from a driver that cannot give it")
+
+# An agent target on a capable driver that reports no observation support.
+r = fresh([receipt(["input_accepted"], observation="unsupported")])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_LEGACY:
+    problems.append("an affirmatively unobservable receipt was not LEGACY")
+
+# MISSING evidence is never promoted: no observation field at all is UNPROVEN.
+r = fresh([receipt(["input_accepted"], observation=""), receipt(["input_accepted"], observation="")])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_UNPROVEN:
+    problems.append("a receipt with no observation status was not UNPROVEN")
+
+# A non-agent target accepted the text, so something WAS typed there. That is a
+# wrong target -- it must not be retyped, and it must not read as refused.
+r = fresh([receipt(["input_accepted"], provider="unsupported", observation="unsupported")])
+status, _info = h.send_prompt("term_1", "/compact")
+if status != h.SEND_UNPROVEN:
+    problems.append("an accepted non-agent target was not UNPROVEN: %r" % (status,))
+if len(sends(r)) != 1:
+    problems.append("a wrong target was typed into twice")
+
+# Only an explicit refusal proves nothing was typed.
+r = fresh([receipt([], accepted=False, ok=False)])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_REJECTED:
+    problems.append("an explicit refusal was not REJECTED")
+
+# A failure that names no acceptance says nothing about the keystrokes, so it is
+# UNPROVEN and gets exactly one send -- never a fallback that retypes.
+r = fresh([{"ok": False, "error": "transport blew up"}])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_UNPROVEN:
+    problems.append("an ambiguous failure was not UNPROVEN")
+if len(sends(r)) != 1:
+    problems.append("an ambiguous failure was retried: %r sends" % (len(sends(r)),))
+
+# Unparseable output is ambiguous in the same way.
+r = fresh([])
+r.replies = []
+class Garbled:
+    returncode = 0
+    stdout = "not json"
+    stderr = ""
+h._SUBMIT_PROOF_SUPPORTED = True
+h.subprocess.run = lambda argv, **kw: Garbled()
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_UNPROVEN:
+    problems.append("an unparseable receipt was not UNPROVEN")
+
+# The boolean wrapper keeps go/no-go for the callers that only need that.
+r = fresh([receipt(["input_accepted"]), receipt(["input_accepted"])])
+if h.send_text("term_1", "x") is not False:
+    problems.append("send_text reported an unproven send as success")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# An unproven /compact must not be silent: the cycle is disarmed, nothing is
+# re-sent, and a record says which request was abandoned.
+python3 - <<'PY' && ok "an unproven compact send is recorded and disarms its own cycle" || bad "an unproven compact send is still silent"
+import os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+sid = "unproven-send-test"
+nonce = h.set_self_fire_intent(sid, "tab:leaf")
+h.orca_bin = lambda: "orca"
+h.resolve_handle = lambda pane: "term_1"
+h.wait_tui_idle = lambda handle, timeout_ms=0: True
+h.codex_rollout_watermark = lambda session_id: None
+sent = []
+h.send_prompt = lambda handle, text, observe_sec=h.SUBMIT_OBSERVE_SEC: (
+    sent.append(text), (h.SEND_UNPROVEN, {"detail": "accepted, but no turn start was observed",
+                                          "provider": "claude", "stages": ["input_accepted"],
+                                          "request_id": "req-9"}))[1]
+h.cmd_inject(["tab:leaf", "/compact", sid, nonce])
+if sent != ["/compact"]:
+    problems.append("the prompt was typed %r times" % (len(sent),))
+record = h._read_json(h.submit_path(sid))
+if record.get("status") != h.SEND_UNPROVEN or record.get("request_id") != "req-9":
+    problems.append("no usable submission record: %r" % (record,))
+if h.peek_self_fire_intent(sid):
+    problems.append("the intent survived an unproven send")
+
+# But a cycle that is visibly progressing keeps its intent: failing to OBSERVE a
+# submission is not evidence that it did not happen.
+sid2 = "unproven-but-progressing"
+nonce2 = h.set_self_fire_intent(sid2, "tab:leaf")
+h.write_marker(sid2, {"state": "pending", "trigger": "manual"})
+h.cmd_inject(["tab:leaf", "/compact", sid2, nonce2])
+if not h.peek_self_fire_intent(sid2):
+    problems.append("a compaction that had already started was disarmed")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# The diagnostic is written by this hook but quotes text another process wrote,
+# so every field is capped -- and doctor must report the disposition that was
+# actually taken, not a sentence chosen when the record was written.
+python3 - <<'PY' && ok "the submission record is bounded and doctor reports its disposition" || bad "the submission record or its doctor line is wrong"
+import contextlib, io, os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+sid = "bounded-record-test"
+h.note_submission(sid, "n1" * 80, "/compact" + "x" * 400, h.SEND_UNPROVEN, {
+    "provider": "claude", "observation": "supported",
+    "stages": ["input_accepted"] * 20,
+    "request_id": "r" * 400,
+    "detail": "d" * 900,
+    "warnings": ["w" * 900, "second" * 200, "third", "fourth"],
+}, "intent released: no sign the compaction started")
+rec = h._read_json(h.submit_path(sid))
+if len(rec.get("detail", "")) > 200 or len(rec.get("request_id", "")) > 64:
+    problems.append("detail/request_id were not capped")
+if len(rec.get("prompt", "")) > 60 or len(rec.get("stages", [])) > 6:
+    problems.append("prompt/stages were not capped")
+if len(rec.get("warnings", [])) > 2 or any(len(w) > 200 for w in rec.get("warnings", [])):
+    problems.append("warnings were not capped: %r" % (rec.get("warnings"),))
+mode = oct(h.submit_path(sid).stat().st_mode & 0o777)
+if mode != "0o600":
+    problems.append("the record is not 0600: %s" % mode)
+if not h.submit_path(sid).name.endswith(h.SIDECAR_SUFFIXES):
+    problems.append("the record is not swept as a sidecar")
+
+# A control character in another process's warning must not split the record's
+# line-oriented fields.
+h.note_submission(sid, "n2", "/compact", h.SEND_UNPROVEN,
+                  {"warnings": ["line one\nRESET line two"]}, "intent released")
+if "\n" in (h._read_json(h.submit_path(sid)).get("warnings") or [""])[0]:
+    problems.append("a newline survived into the record")
+
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    h.cmd_doctor()
+text = out.getvalue()
+if "intent released" not in text:
+    problems.append("doctor did not print the recorded disposition")
+if "Nothing was re-sent" not in text:
+    problems.append("doctor did not state that nothing was re-sent")
+
+# A proven send leaves no complaint behind.
+h.note_submission(sid, "n3", "/compact", h.SEND_PROVEN, {}, "sent")
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    h.cmd_doctor()
+if "last send" in out.getvalue():
+    problems.append("doctor reported a proven send as a problem")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# Round-3 review: a kept cycle must reach the armed watcher no matter WHICH
+# marker read found it, a replay is judged by the same evidence rule as the first
+# receipt, and a release is only asserted once it has happened.
+python3 - <<'PY' && ok "a kept cycle reaches the watcher, and a replay cannot outrank its own receipt" || bad "kept-cycle continuation or replay classification is wrong"
+import json, os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+real_send_prompt = h.send_prompt    # section (1) stubs it; section (2) needs the real one
+
+# (1) The marker appears only on the SECOND read, and a Codex watch is armed.
+sid = "late-marker-watcher"
+nonce = h.set_self_fire_intent(sid, "tab:leaf")
+h.orca_bin = lambda: "orca"
+h.resolve_handle = lambda pane: "term_1"
+h.wait_tui_idle = lambda handle, timeout_ms=0: True
+h.codex_rollout_watermark = lambda session_id: ("/rollout", 0)
+h.send_prompt = lambda handle, text, observe_sec=0: (h.SEND_UNPROVEN, {"detail": "x"})
+reads = {"n": 0}
+def late_marker(session_id):
+    reads["n"] += 1
+    return reads["n"] > 1
+h.marker_active = late_marker
+watched = []
+h.wait_codex_compaction_complete = lambda path, offset, timeout_sec=0: (
+    watched.append((path, offset)), False)[1]
+cleared = []
+h.clear_self_fire_intent = lambda s, n="": cleared.append(s)
+h.cmd_inject(["tab:leaf", "/compact", sid, nonce])
+if not watched:
+    problems.append("a kept cycle with an armed watcher never entered it")
+record = h._read_json(h.submit_path(sid))
+if not record.get("disposition", "").startswith("intent kept"):
+    problems.append("the kept disposition was not recorded: %r" % (record.get("disposition"),))
+
+# (2) A replay that contradicts itself proves nothing.
+h.send_prompt = real_send_prompt
+h.driver_argv = lambda args: ["/trusted/orca", *args]
+def run_with(replies, help_text="--wait-submit"):
+    class Runner:
+        def __init__(self):
+            self.replies = list(replies)
+        def __call__(self, argv, **kwargs):
+            body = help_text if "--help" in argv else json.dumps(self.replies.pop(0))
+            class Done:
+                returncode = 0
+                stdout = body
+                stderr = ""
+            return Done()
+    h._SUBMIT_PROOF_SUPPORTED = None
+    h.subprocess.run = Runner()
+
+first = {"ok": True, "result": {"send": {"accepted": True, "prompt": {
+    "stages": ["input_accepted"], "provider": "claude",
+    "observation": "supported", "requestId": "req-1"}}}}
+contradictory = {"ok": True, "result": {"send": {"accepted": False, "prompt": {
+    "stages": ["input_accepted", "turn_started"], "provider": "claude",
+    "observation": "supported", "requestId": "req-1"}}}}
+run_with([first, contradictory])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_UNPROVEN:
+    problems.append("a replay stating a refusal still proved a turn start")
+
+# A replay that simply omits acceptance is fine: the first receipt established it.
+silent = {"ok": True, "result": {"send": {"prompt": {
+    "stages": ["input_accepted", "turn_started"], "provider": "claude",
+    "observation": "supported", "requestId": "req-1"}}}}
+run_with([first, silent])
+if h.send_prompt("term_1", "/compact")[0] != h.SEND_PROVEN:
+    problems.append("a replay that omits acceptance was not accepted as proof")
+
+# (3) C1 controls never reach the record.
+h.note_submission("c1-test", "n", "/compact", h.SEND_UNPROVEN,
+                  {"warnings": ["before\u009bafter"]}, "intent released")
+stored = (h._read_json(h.submit_path("c1-test")).get("warnings") or [""])[0]
+if "\u009b" in stored:
+    problems.append("a C1 control survived into the record: %r" % (stored,))
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
+PY
+
+# A release is recorded as attempted first and completed only afterwards, and
+# doctor's retry advice follows the disposition rather than assuming one.
+python3 - <<'PY' && ok "release is asserted only after it happens, and doctor advises accordingly" || bad "disposition ordering or doctor advice is wrong"
+import contextlib, io, os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+problems = []
+sid = "release-order"
+nonce = h.set_self_fire_intent(sid, "tab:leaf")
+h.orca_bin = lambda: "orca"
+h.resolve_handle = lambda pane: "term_1"
+h.wait_tui_idle = lambda handle, timeout_ms=0: True
+h.codex_rollout_watermark = lambda session_id: None
+h.marker_active = lambda session_id: False
+h.send_prompt = lambda handle, text, observe_sec=0: (h.SEND_UNPROVEN, {"detail": "x"})
+seen = []
+real_give_up_marker = {"called": False}
+def spy_clear(session_id, nonce=""):
+    # Whatever is on disk at the moment of the release must not yet claim it.
+    seen.append(h._read_json(h.submit_path(session_id)).get("disposition", ""))
+    real_give_up_marker["called"] = True
+h.clear_self_fire_intent = spy_clear
+h.cmd_inject(["tab:leaf", "/compact", sid, nonce])
+if not real_give_up_marker["called"]:
+    problems.append("the intent was never released")
+if not seen or not seen[0].startswith("intent release attempted"):
+    problems.append("the release was asserted before it happened: %r" % (seen,))
+final = h._read_json(h.submit_path(sid)).get("disposition", "")
+if not final.startswith("intent released"):
+    problems.append("the completed release was not recorded: %r" % (final,))
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    h.cmd_doctor()
+released_text = out.getvalue()
+if "may still be queued" not in released_text:
+    problems.append("doctor did not warn that the prompt may still be queued")
+if "once the session is clear, re-run" not in released_text:
+    problems.append("doctor did not say a disarmed cycle can be re-run")
+h.note_submission(sid, "n", "/compact", h.SEND_UNPROVEN, {},
+                  "intent kept: this cycle's compaction is under way")
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    h.cmd_doctor()
+text = out.getvalue()
+if "re-run to retry" in text or "may still be queued" not in text:
+    problems.append("doctor told the user to re-run a cycle that is still armed")
+for m in problems:
+    sys.stderr.write("  " + m + "\n")
+sys.exit(1 if problems else 0)
 PY
 
 # Every give-up path in the compact waiter must release its own intent, and
@@ -1110,7 +1494,9 @@ import precompact_hook as h
 cleared = []
 h.clear_self_fire_intent = lambda sid, nonce="": cleared.append((sid, nonce))
 h.peek_self_fire_intent = lambda sid, nonce="": "tab:leaf"
-h.send_text = lambda handle, text: True
+h.send_prompt = lambda handle, text, observe_sec=0: (h.SEND_PROVEN, {})
+h.read_marker = lambda sid: {}
+h.note_submission = lambda *args, **kwargs: None
 problems = []
 
 def run(label, **stubs):
@@ -1118,7 +1504,8 @@ def run(label, **stubs):
     h.orca_bin = stubs.get("orca_bin", lambda: "orca")
     h.resolve_handle = stubs.get("resolve_handle", lambda pane: "term_1")
     h.wait_tui_idle = stubs.get("wait_tui_idle", lambda handle, timeout_ms=0: True)
-    h.send_text = stubs.get("send_text", lambda handle, text: True)
+    h.send_prompt = stubs.get(
+        "send_prompt", lambda handle, text, observe_sec=0: (h.SEND_PROVEN, {}))
     h.cmd_inject(["tab:leaf", "/compact", "sid", "n1"])
     return label, list(cleared)
 
@@ -1126,7 +1513,10 @@ for label, got in [
     run("no driver", orca_bin=lambda: ""),
     run("handle gone", resolve_handle=lambda pane: ""),
     run("never idle", wait_tui_idle=lambda handle, timeout_ms=0: False),
-    run("send failed", send_text=lambda handle, text: False),
+    # An unproven send is a give-up too: the text may be stranded in the composer,
+    # and the cycle must not stay armed for a compaction that never started.
+    run("send failed",
+        send_prompt=lambda handle, text, observe_sec=0: (h.SEND_UNPROVEN, {"detail": "x"})),
 ]:
     if got != [("sid", "n1")]:
         problems.append("%s cleared %r, want [('sid','n1')]" % (label, got))

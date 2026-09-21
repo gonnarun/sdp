@@ -154,6 +154,54 @@ The verdict MUST also close with:
 
 **`SEVERITY` and `SCOPE` are fixed-value enums, not free text.** `closeable-in-this-dispatch` means the finding must be fixed in this dispatch; `must-be-recorded-instead` means it belongs in the non-conformance register rather than in a new mechanism. Free-form coverage prose does not satisfy this contract — unranked findings are how one mechanism per finding gets built, and each such mechanism becomes the next round's defect. The `INCOMPLETE` form is likewise exact: a bare `INCOMPLETE` loses both which field is missing and why.
 
+
+### BLOCK response contract (author side) ★
+
+The six fields above bind the REVIEWER. Nothing bound the AUTHOR, and the asymmetry has a
+cost: the cheapest way to answer "you did not address X" is to write more prose, so artifacts
+grow with every round and the growth is paid again by every later stage that reads them. The
+measured cohort behind this rule is recorded in `docs/MEASUREMENTS.md`; it is not repeated
+here, because a number in an instruction is read on every dispatch and ages badly.
+
+**First, classify the finding.** The answer differs by kind, and misclassifying is how a
+document grows without getting better:
+
+| kind | what it is | how it is answered |
+|---|---|---|
+| `DEFECT` | the plan, design, code or test is wrong | fix THAT, then update the section that described it |
+| `CLARIFICATION` | the artifact is right but unreadable on the point | rewrite that passage in place — no new section |
+| `NEW_REQUIRED_CONTENT` | something genuinely absent is required | add it to the section that owns it, or to a schema section that is missing, tagged with the finding or REQ id that forced it. An id, not the finding's text: quoting the review back into the artifact is how the review itself accumulates there |
+| `EVIDENCE` | the claim needs proof | in the owning section put the conclusion AND the check, then cite where the full log lives. A path alone is not evidence to a reviewer with no tools and comes back as another BLOCK. **If it can be re-run safely**: the exact command and its result. **If it cannot** (flaky environment, production-only data, a one-off run): the observed result as recorded, with its timestamp, environment and source, plus one line naming the reproduction limit. **If neither survives**: label it `INCOMPLETE - EVIDENCE not supplied because <reason>` and leave the claim unverified. Never invent a command or a result, and never re-run against production to satisfy this rule |
+
+**Then apply these:**
+
+1. **Fix the thing, not the description of the thing.** A `DEFECT` is not discharged by
+   describing it more fully.
+2. **Edit in place.** Rewrite the section the finding names. Do not append a rebuttal, a
+   history, a "response to review" section, or any other parking place for answers — those are
+   forbidden by name. A new section is legitimate only for `NEW_REQUIRED_CONTENT`, and only
+   where this stage's document schema says that section belongs.
+3. **Do not evict what is still true.** Replacing a section does not license deleting
+   requirements, accepted ADR rationale, previously verified cases, or failure chronology that
+   still holds. If a finding seems to require dropping one of those, that is a `DEFECT` in the
+   finding — say so under rule 5.
+4. **Say what changed, not how big it got.** The re-gate request opens with one line:
+   `re-gate round N | findings closed: <ids>`.
+   A finding answered with `INCOMPLETE` is NOT closed and does not appear in that list —
+   it is still open, and listing it would close it by assertion.
+   Finding ids only. No byte counts, no section list: the previous artifact is not retained, so
+   neither is verifiable, and a self-reported number invites a meta-argument about size instead
+   of correctness. The engine records the real bytes per verdict.
+5. **A repeated finding means one of three things** — the fix did not land, the finding was
+   misread, or the finding is wrong. Say which in one line and act: land it, re-answer it, or
+   dispute it. A dispute is one line naming the evidence that contradicts the finding; it is a
+   legitimate outcome and it is not answered by restating the artifact.
+
+There is no response-size budget, deliberately: a byte cap is satisfied by moving the same text
+into code comments, commit messages or a second file. What is bounded is the SHAPE of the
+answer — classify, replace, preserve — and the engine measures the rest. (A hard transport
+limit does exist: an artifact over 512,000 bytes is refused by the gate before any review.)
+
 ### Review dimensions (the gate's prompt — de-domained)
 1. All test-plan cases and REQ-xxx reflected in the result (except any `Must` REQ formally waived in Stage 6 §9 — attended only; a waived REQ is documented `INCOMPLETE`, not a coverage gap).
 2. CI results (`${build.build}`, `${build.lint}`) stated.

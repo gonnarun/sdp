@@ -213,6 +213,35 @@ def _read_limited(path: Path, limit: int) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _read_artifact(path: Path, limit: int) -> tuple[str, dict[str, Any]]:
+    """Read the artifact ONCE and fingerprint that raw buffer.
+
+    What the fingerprint denotes, at the strength it can carry: the RAW INPUT
+    SNAPSHOT a content verdict was formed from. It is taken before decoding, so it
+    is the bytes on disk at read time, not the decoded prompt text -- and it proves
+    nothing about whether any process consumed them.
+
+    The first cut fingerprinted the file again at record time, after the provider
+    had returned. That binds a verdict to whatever the path held afterwards, and it
+    read one byte past the cap, so an oversized artifact was logged as 512001 bytes
+    with a prefix digest -- a number that is not the file's size and a hash that
+    matches nothing. Both are fatal for the only purpose the fingerprint has, which
+    is deciding whether an artifact grew before or after a BLOCK.
+
+    So: one open, one read, and the size, the digest and the decoded prompt text all
+    come from that single buffer. Over-cap still refuses, exactly as before.
+    """
+    import hashlib
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"artifact too large: >{limit} bytes")
+    return (
+        data.decode("utf-8", errors="replace"),
+        {"artifact_bytes": len(data), "artifact_sha256": hashlib.sha256(data).hexdigest()},
+    )
+
+
 def _load_prompt(raw_prompt: str, root: Path) -> str:
     if not raw_prompt.startswith("@"):
         return raw_prompt
@@ -606,11 +635,8 @@ def _run_argv(
     except OSError as exc:
         _cleanup_exec(tmpdir)
         return ProviderResult("infra", argv[0], "", "", f"spawn failed: {exc}")
-    # exec has succeeded; the running child holds the inode, so the hardlink is no
-    # longer needed and is removed now (rather than threading tmpdir through every
-    # later return path).
-    _cleanup_exec(tmpdir)
-
+    # Keep the pinned link until the child exits. agy resolves its own path after
+    # spawn; unlinking immediately can kill a real review on macOS.
     timed_out = False
     try:
         stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
@@ -627,6 +653,8 @@ def _run_argv(
                 stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
+    finally:
+        _cleanup_exec(tmpdir)
 
     if timed_out:
         return ProviderResult("infra", argv[0], "", stdout or "", "timeout", proc.returncode, True)
@@ -884,6 +912,39 @@ def _codex_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Pr
     return result
 
 
+def _extract_agy_stream(raw: str) -> str:
+    """Accept one successful, tool-free agy stream-json turn or fail closed."""
+    try:
+        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        if len(events) < 2 or any(not isinstance(event, dict) for event in events):
+            return ""
+        if events[0].get("event") != "init" or events[-1].get("event") != "result":
+            return ""
+        if sum(event.get("event") == "init" for event in events) != 1:
+            return ""
+        if sum(event.get("event") == "result" for event in events) != 1:
+            return ""
+        for event in events[1:-1]:
+            if event.get("event") != "step_update":
+                return ""
+            step = event.get("step_update")
+            if not isinstance(step, dict):
+                return ""
+            if step.get("step_type") not in ("user_input", "agent_response", "checkpoint"):
+                return ""
+            if "tool_info" in step or "subagent_info" in step:
+                return ""
+        result = events[-1].get("result")
+        if not isinstance(result, dict):
+            return ""
+        if result.get("status") != "SUCCESS" or result.get("num_turns") != 1:
+            return ""
+        response = result.get("response")
+        return response if isinstance(response, str) else ""
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+
+
 def _agy_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> ProviderResult:
     binary, reason = _trusted_binary("agy", root)
     if binary is None:
@@ -892,18 +953,23 @@ def _agy_result(root: Path, prompt: str, raw_model: str, timeout_s: int) -> Prov
     if model_err:
         return ProviderResult("infra", "agy", "", "", model_err)
     max_output = DEFAULT_MAX_OUTPUT_BYTES   # ADR-004 D2 table: constant, never an env knob
-    argv = [str(binary), "--new-project"]
+    argv = [
+        str(binary), "--new-project", "--mode", "plan",
+        "--input-format", "stream-json", "--output-format", "stream-json",
+    ]
     # H3 (REQ-005): agy's model flag is `--model`, not `-m` (`-m` was a silent
     # no-op that fell back to the default model).
     if model:
         argv.extend(["--model", model])
-    # Prompt over stdin, not argv: `-p/--print` is documented as "useful for pipes"
-    # and --input-format defaults to text on both claude and agy. This keeps the
-    # artifact -- the largest untrusted input the gate handles -- off every command
-    # line, and off the 8191-character cmd.exe limit a Windows .cmd shim imposes.
-    argv.append("-p")
+    # agy 1.2.7 requires a value after -p. Its documented stream-json input
+    # accepts a user event over stdin and keeps the artifact off argv. Only the
+    # terminal result.response may supply a verdict; tool use fails closed.
+    stream_input = json.dumps(
+        {"event": "user", "message": {"content": prompt}}, ensure_ascii=False
+    ) + "\n"
     result = _run_argv(argv, cwd=root, timeout_s=timeout_s,
-                       max_output=max_output, stdin_text=prompt)
+                       max_output=max_output, stdin_text=stream_input,
+                       extract=_extract_agy_stream)
     result.provider = "agy"
     return result
 
@@ -937,6 +1003,8 @@ def _audit_row(
     exit_code: int | None = None,
     timeout: bool = False,
     config_source: str | None = None,
+    artifact_bytes: int | None = None,
+    artifact_sha256: str | None = None,
 ) -> dict[str, Any]:
     # Union audit schema (ADR-003 D2b / §2.6). key/round are null-not-absent so a
     # reader can tell "unresolvable" from "forgotten".
@@ -953,6 +1021,14 @@ def _audit_row(
         "exit_code": exit_code,
         "timeout": timeout,
         "config_source": config_source,
+        # Size and digest of the RAW INPUT SNAPSHOT a content verdict was formed
+        # from -- never content, and never re-read from disk afterwards. Null on
+        # every row no reviewer answered. Purpose: no revision history survives,
+        # so without a per-verdict fingerprint it is impossible to tell afterwards
+        # whether an artifact grew before or after a BLOCK. See
+        # docs/MEASUREMENTS.md for the cohort that motivated it.
+        "artifact_bytes": artifact_bytes,
+        "artifact_sha256": artifact_sha256,
         # ADR-W05 W05-b(3): an ALLOW produced without POSIX ownership verification
         # must be distinguishable after the fact from one produced with it.
         "trust": win_compat.trust_mode(),
@@ -983,6 +1059,10 @@ def _record_shim_hit() -> None:
             "verdict": "SHIM_HIT",
             "provider": "shim",
             "artifact": None,
+            # Present-and-null, not absent: a reader that has to tell "no artifact"
+            # from "field not written yet" cannot do it from a missing key.
+            "artifact_bytes": None,
+            "artifact_sha256": None,
             "key": None,
             "round": None,
         }
@@ -2076,7 +2156,7 @@ def run_review(
         # an env-sourced value lets the reviewee truncate the artifact under review.
         max_artifact = DEFAULT_MAX_ARTIFACT_BYTES
         prompt_text = _load_prompt(review_prompt, root)
-        artifact_text = _read_limited(artifact, max_artifact)
+        artifact_text, fingerprint = _read_artifact(artifact, max_artifact)
         full_prompt = _review_prompt(prompt_text, artifact, artifact_text, review_checklist)
     except InfraError as exc:
         # Root/state resolution failed -> pre-root sink (no audit_base exists).
@@ -2432,7 +2512,16 @@ def run_review(
                 "output": final.output, "reason": final.reason, "primary_error": primary_error,
                 "exit_code": 0, "timeout": final.timed_out, "round": count,
             }
-        audited = _record(audit_base, artifact, key, result["round"], result, config_source)
+        # What this field means, stated at the strength it can carry: it is the INPUT
+        # SNAPSHOT BEHIND A CONTENT VERDICT -- the bytes this gate assembled for the
+        # provider that returned the verdict on this row. It is not proof that any
+        # process consumed them: a provider can execute and still fail without a
+        # verdict, and that lands as provider="none" with nulls. Attaching a
+        # fingerprint to a row no reviewer answered would pollute the dataset the
+        # field exists to build, so it rides only on rows a reviewer produced.
+        reviewed = result.get("provider") in ("claude", "codex", "agy")
+        audited = _record(audit_base, artifact, key, result["round"], result,
+                          config_source, fingerprint if reviewed else None)
         if not audited and result["verdict"] == "ALLOW":
             # ADR-G09 item 4 / §4.5 B3: the write now happens HERE, inside L5's
             # lock, rather than inside _record.
@@ -2449,14 +2538,23 @@ def _record(
     round_: int | None,
     result: dict[str, Any],
     config_source: str | None,
+    fingerprint: dict[str, Any] | None = None,
 ) -> bool:
+    # `fingerprint` is passed ONLY by the path that produced a content verdict, and
+    # it holds the raw input snapshot that verdict was formed from. Every other call
+    # site -- a sticky halt, an escalation refusal, a marker -- leaves it None, so
+    # the row records null. That is the honest answer: no verdict was formed from an
+    # artifact there, and a size copied from disk afterwards would invent one.
     # §5b -- _record IS PURE: it returns whether the audit row was written and
     # performs NO state writes. A4's asymmetric fail-close (an unauditable ALLOW
     # becomes INFRA_ERROR) now lives at the two ALLOW-emitting call sites, which
     # own the lock and can write .infra_flag; BLOCK/INFRA_ERROR sites ignore the
     # bool because the outcome is already the safe one (§4.5 B3).
+    fingerprint = fingerprint or {}
     row = _audit_row(
         artifact=str(artifact) if artifact else None,
+        artifact_bytes=fingerprint.get("artifact_bytes"),
+        artifact_sha256=fingerprint.get("artifact_sha256"),
         key=key, round_=round_, provider=result.get("provider", ""),
         verdict=result.get("verdict", ""), reason=result.get("reason", ""),
         primary_error=result.get("primary_error", ""),
