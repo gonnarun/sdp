@@ -141,18 +141,73 @@ RESUME_INJECT_PROMPT = (
     "(Remaining). Open with one line confirming the precompact cycle completed."
 )
 
+# The automation fast-path, and why it reads like a budget rather than a
+# workflow. Measured 2026-09-23, Codex session 01a0c2ba, window 258400: the
+# block landed at 81.6% and the host compacted at 83.1%, so the turn it bought
+# was worth about 2800 tokens. The model spent 3960 of them preparing -- 840
+# re-reading the skill it had just been told to follow, 2558 on an agent
+# listing, 562 on the git/gh/ssh fan-out that the skill's "gather measured
+# context" step asks for -- and the snapshot was never written. Nothing in that
+# turn was wrong except its cost. So this text states the budget and forbids
+# the preparation, instead of pointing at a workflow whose first step is to go
+# out and measure things. The skill's numbered workflow stays as the manual
+# path; see its "Automation fast-path" section.
+# What the block may claim about the day directory. The hook creates it, but a
+# read-only tree, a reparse point in the chain or a vanished cwd all make that
+# fail, and the text must then say so rather than assert a directory that is
+# not there. The mkdir carve-out exists only on that path.
+DIR_READY_NOTE = "That directory already exists -- it was created for you."
+DIR_MISSING_NOTE = (
+    "That directory could NOT be created for you. Try ONE mkdir -p of it and "
+    "then write the file -- that is the only command allowed here. If the "
+    "mkdir fails, do not retry and do not look into why: say in one line that "
+    "the snapshot directory could not be created, and stop."
+)
+# The mkdir clause either bans it outright or carves out the single exception
+# the fallback above just required. It is never absent: dropping the word is
+# how "no commands" quietly stops covering the one command that matters here.
+MKDIR_BANNED_NOTE = "no mkdir, "
+MKDIR_ALLOWED_NOTE = "no mkdir beyond the one named above, "
+# The unsafe path gets its own text rather than a note inside the normal one.
+# There is no snapshot to ask for: the location is refused, and every sentence
+# about topics, sections and tags would be an instruction to write there anyway.
+UNSAFE_DIR_REASON = (
+    "Context usage is at {pct:.0f}% of the window, past the SDP precompact "
+    "threshold of {threshold:.0f}%, but the snapshot location is REFUSED: a "
+    "component of {cwd}/.private/precompact is not a plain directory inside "
+    "this workspace. It is a symlink or junction, which would resolve "
+    "elsewhere, or a file or other object occupying the name. Snapshots "
+    "written there are read back into the next context, so SDP will not "
+    "create or use it and you must not create it either.\n"
+    "Do not write a snapshot. Tell the user this in one line, name the path, "
+    "and say that every component of .private/precompact must be a real "
+    "directory inside the workspace before automatic precompact can work "
+    "here. Then stop."
+)
 BLOCK_REASON = (
     "Context usage is at {pct:.0f}% of the window, past the SDP precompact "
-    "threshold of {threshold:.0f}%. Auto-compact is close and will discard the "
-    "working state. Before ending this turn, run the SDP precompact workflow "
-    "now: gather the measured in-progress state and write the snapshot to "
-    ".private/precompact/{today}/precompact_{{topic}}_{tag}.md following the "
-    "precompact skill -- the _{tag} suffix is required, it is what binds this "
-    "snapshot to this session. Infer the topic from the work in progress and "
-    "say in one line what you picked; do not ask the user to choose. Write the "
-    "file and nothing else -- do not print the resume prompt, do not start new "
-    "work, and do not commit or push. The post-compact resume is injected "
-    "automatically once the snapshot exists."
+    "threshold of {threshold:.0f}%. Auto-compact is imminent and will discard "
+    "the working state. This turn is the whole budget: whatever you spend here "
+    "is taken from the snapshot, and a compaction can land mid-turn, so a "
+    "snapshot written late is a snapshot lost.\n"
+    "Write .private/precompact/{today}/precompact_{{topic}}_{tag}.md NOW, from "
+    "what is already in this conversation. {dir_note} The _{tag} suffix is "
+    "required: it is what binds this snapshot to this session. Infer the topic "
+    "from the work in progress; do not ask the user to choose.\n"
+    "Run no commands to prepare it, and open no files. No git, no gh, no ssh, "
+    "{mkdir_note}no reads, no searches, no agent or task listings, and no "
+    "reference or manual pages. This message is the contract; anything you "
+    "read instead is charged to the snapshot. The MANUAL procedure, including "
+    "its \"gather measured context\" step, does not apply here.\n"
+    "Keep the six sections (0 Current Work, 1 Completed, 2 Remaining, 3 Open "
+    "Files / Locations, 4 Pitfalls / Rules, 5 Open Questions). Any fact you "
+    "cannot supply from memory of this conversation is `unknown` -- an "
+    "`unknown` costs nothing and a missing file costs everything. Never invent "
+    "a hash, path or result to fill a section.\n"
+    "The file is the only deliverable. Do not print the resume prompt, do not "
+    "start new work, do not commit or push, and say at most one short line "
+    "after the write. The post-compact resume is injected automatically once "
+    "the snapshot exists."
 )
 
 RESUME_CONTEXT = (
@@ -262,6 +317,158 @@ def state_dir() -> Path:
     if override:
         return _assert_trusted(Path(override), "state dir override")
     return _assert_trusted(sdp_home() / STATE_DIRNAME, "state dir")
+
+
+def read_cycles(limit: int = 2000) -> list:
+    """Read the cycle ledger, newest last. Malformed lines are skipped, not fatal.
+
+    Bounded by line count as well as by file size: the ledger is appended to by
+    every session on the machine, and doctor must stay cheap enough to run.
+    """
+    try:
+        path = cycles_path()
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            return []
+        with open(path, "r", encoding="utf-8") as fh:
+            if st.st_size > MAX_CYCLES_BYTES:
+                # Concurrent appenders can carry the file past the soft cap.
+                # Refusing to read it then would hide every measurement the
+                # ledger exists to collect, permanently, which is a worse
+                # outcome than the one the cap guards against. Seek to the last
+                # window instead and drop the first line, which is almost
+                # certainly cut in half.
+                fh.seek(st.st_size - MAX_CYCLES_BYTES)
+                fh.readline()
+            lines = fh.readlines()[-limit:]
+    except (OSError, ValueError):
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def cycles_path() -> Path:
+    """Where finished cycles accumulate.
+
+    Its own seam, separate from the state directory's. The suite deliberately
+    exercises markers in the REAL state directory and sweeps them afterwards by
+    session-id pattern -- which works because a marker is one file per session.
+    The ledger is a single shared append-only file: it matches no per-session
+    pattern, and sweeping it would delete the user's actual measurements along
+    with the synthetic ones. So the tests redirect this instead. Without that,
+    every suite run silently files its fixtures as real history; two rounds of
+    this change did exactly that, 66 rows and then 99.
+    """
+    override = _selftest_override("SDP_PRECOMPACT_CYCLES")
+    if override:
+        return _assert_trusted(Path(override), "cycle ledger override")
+    return _assert_trusted(state_dir() / CYCLES_BASENAME, "cycle ledger")
+
+
+def record_cycle(row: dict) -> bool:
+    """Append one finished precompact cycle to the ledger. Never raises.
+
+    Why a ledger rather than the marker: the marker is deleted when the cycle
+    closes, so the one number that decides the threshold -- what the snapshot
+    turn actually cost -- is destroyed at exactly the moment it becomes known.
+    Nothing here steers behaviour today; the rows exist so the Codex-side
+    absolute-token gate can be set from measurement instead of from the single
+    reverse-engineered observation that is all KNOWN_GAPS NC-34 has.
+
+    Honest about what it cannot see: ``used_at_precompact`` is measured when
+    PreCompact fires, which is AFTER the snapshot turn, so the recorded cost is
+    that turn's whole cost and not the write's alone. No hook runs at the write
+    itself, so the narrower number is not observable from here. That makes the
+    recorded value an UPPER bound, which is the safe direction: a headroom
+    fitted to it is larger than necessary and the threshold fires earlier than
+    necessary. Wasting a little context is the failure this trades for losing a
+    snapshot. The field is named ``turn_cost_upper_bound`` so nobody has to
+    remember which way it errs.
+
+    Append-only and best-effort: a failed append must never cost a compaction,
+    so every error is swallowed and reported through the return value. The size
+    limit is a soft cap -- see the comment at the size test for what concurrency
+    does to it.
+    """
+    try:
+        line = json.dumps(row, sort_keys=True) + "\n"
+    except (TypeError, ValueError):
+        return False
+    if len(line) > MAX_CYCLE_ROW_BYTES:
+        return False
+    try:
+        path = cycles_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    # O_APPEND makes concurrent sessions interleave whole lines rather than
+    # overwrite each other; O_NOFOLLOW keeps the ledger from being aimed
+    # elsewhere.
+    flags = win_compat.open_flags(
+        os.O_WRONLY, os.O_CREAT, os.O_APPEND, getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        return False
+    # Ownership of the descriptor is handed to fdopen only on the success path.
+    # Every early return below is a refusal, and a refusal that leaks a
+    # descriptor turns a bounded ledger into an unbounded fd leak in a hook
+    # that runs on every compaction.
+    handed_off = False
+    try:
+        # Every check below runs on the OPEN DESCRIPTOR, not on the path. An
+        # lstat before the open decides about a file that may no longer be the
+        # one being written to, and that is the difference between a cap and a
+        # suggestion.
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        # The size test includes the row about to be appended, so the cap holds
+        # for this writer rather than being discovered one row after it broke.
+        # It is still a SOFT cap under concurrency: two appenders can both pass
+        # it and both write, so the ledger can exceed the limit by at most one
+        # row per concurrent writer. Taking a lock to close that would put a
+        # blocking syscall on the compaction path to protect a disk bound, which
+        # is the wrong trade; the overshoot is bounded and the cap is what
+        # matters.
+        if st.st_size + len(line.encode("utf-8")) > MAX_CYCLES_BYTES:
+            return False
+        # 0600 in os.open applies to CREATION only. A ledger that already
+        # existed with wider bits keeps them, and this file records session
+        # ids and working-directory-derived names. Narrow it on the descriptor
+        # rather than trusting the mode the open did not set.
+        # POSIX only. On Windows os.fchmod may be absent entirely, and NTFS
+        # reports group/world bits in st_mode that mean nothing -- so this
+        # branch would be entered on every append and an AttributeError would
+        # escape the OSError handler below, breaking the "never raises"
+        # contract inside a PreCompact hook. There, confidentiality rests on
+        # the profile directory's ACL, which is what protects every other file
+        # this engine writes on that platform.
+        if win_compat.posix_perms_meaningful() and stat.S_IMODE(st.st_mode) & 0o077:
+            try:
+                os.fchmod(fd, 0o600)
+            except (OSError, AttributeError):
+                return False
+        handed_off = True
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        return False
+    finally:
+        if not handed_off:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return True
 
 
 def _read_json(path: Path, max_bytes: int = MAX_JSON_BYTES) -> dict:
@@ -498,6 +705,31 @@ def _tail_lines(path: Path, max_bytes: int = 2_000_000) -> list[str]:
     return blob.decode("utf-8", "replace").splitlines()
 
 
+def _codex_model(record: dict) -> str:
+    """The model Codex states for a turn, or "".
+
+    Codex never puts the model on the usage event the occupancy comes from, so
+    reading it there yields "" -- which is what shipped first, and what made
+    the cycle ledger unable to separate one host's samples from another's. It
+    is stated on its own records instead, and the newest one wins because the
+    reverse scan reaches it first.
+    """
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if payload.get("type") == "thread_settings_applied":
+        settings = payload.get("thread_settings")
+        if isinstance(settings, dict):
+            model = settings.get("model")
+            if isinstance(model, str) and model:
+                return model
+    if record.get("type") == "turn_context":
+        model = payload.get("model")
+        if isinstance(model, str) and model:
+            return model
+    return ""
+
+
 def _codex_usage(record: dict) -> tuple[int, int]:
     """Occupancy and declared window from one Codex rollout line.
 
@@ -559,11 +791,17 @@ def measure_context(
     Neither format is a stable interface; both are read defensively so an
     unrecognised line measures nothing rather than measuring wrong.
     """
+    # Cleared on entry, not only on the success path. Two of the three returns
+    # below are failures, and a failure that leaves the previous call's host in
+    # place makes the NEXT cycle row claim a host this measurement never read.
+    _LAST_MEASURE["host"] = ""
     if not transcript_path:
         return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None, False)
 
     latest_used: int | None = None
     latest_model: str | None = None
+    codex_model: str | None = None
+    codex_seen = False
     peak_used = 0
     declared_window = 0
 
@@ -583,12 +821,19 @@ def measure_context(
         # Codex rollout
         codex_used, codex_window = _codex_usage(record)
         if codex_used:
+            codex_seen = True
             if codex_used > peak_used:
                 peak_used = codex_used
             if latest_used is None:
                 # Newest usable event wins, and its window comes with it.
                 latest_used = codex_used
                 declared_window = codex_window
+            continue
+        stated = _codex_model(record)
+        if stated:
+            codex_seen = True
+            if codex_model is None:
+                codex_model = stated
             continue
         # A recorded compaction states exactly how much context was resident at
         # the moment it fired. That is the strongest window evidence available
@@ -634,17 +879,133 @@ def measure_context(
             latest_model = model
 
     if latest_used is None:
+        # A rollout whose records were all unusable still identifies its host,
+        # and saying so is more useful than saying nothing.
+        _LAST_MEASURE["host"] = "codex" if codex_seen else ""
         return (0.0, 0, DEFAULT_CONTEXT_TOKENS, None, False)
 
+    if latest_model is None and codex_model:
+        latest_model = codex_model
     limit = context_limit(latest_model, peak_used, cwd, declared_window)
     exact = declared_window > 0 and limit == declared_window
     pct = (latest_used / limit * 100.0) if limit > 0 else 0.0
+    _LAST_MEASURE["host"] = "codex" if codex_seen else "claude"
     return (pct, latest_used, limit, latest_model, exact)
+
+
+# Which transcript format the last measurement actually parsed. A side channel
+# rather than a sixth element because measure_context's tuple is read in a dozen
+# places and every one of them would have to change to carry a field only the
+# ledger wants. Overwritten on each call and read immediately after one.
+_LAST_MEASURE: dict = {"host": ""}
+
+
+def measured_host() -> str:
+    """The host whose format the last ``measure_context`` call read, or "".
+
+    Not a guess from the environment: an agent can run either CLI, and the
+    transcript format is the only thing that states which conversation is being
+    measured. Cycle rows that cannot say this are useless for a per-host
+    threshold, which is the entire reason the ledger exists.
+    """
+    return _LAST_MEASURE.get("host") or ""
 
 
 # --------------------------------------------------------------------------
 # snapshot discovery
 # --------------------------------------------------------------------------
+
+
+# What ensure_day_dir found. Three states, not two: "could not create it" and
+# "refused to create it" call for opposite instructions, and collapsing them is
+# how a path that was rejected for following a symlink gets handed back to the
+# model with permission to mkdir it.
+DAY_DIR_READY = "ready"
+# Named for what is known, not for what is hoped. SDP did not create the
+# directory and nothing here establishes that the caller can either: the same
+# value comes back for a cwd that does not exist, a read-only filesystem and a
+# parent the process cannot write to (reproduced with `chmod 0500`). Calling it
+# "creatable" promised a mkdir would work, which sends a turn with no budget
+# left into retrying one that already failed.
+DAY_DIR_RETRYABLE = "retryable"
+DAY_DIR_UNSAFE = "unsafe"
+
+
+def ensure_day_dir(cwd: str | None, today: str) -> str:
+    """Create ``<cwd>/.private/precompact/<today>``, or say why not.
+
+    The automated path forbids every preparation command, including ``mkdir``.
+    On the first snapshot of a day the directory does not exist yet, so without
+    this the model is left with a contradiction: write a file into a directory
+    it is not allowed to create. It would either fail the write or disobey --
+    and the whole point of the fast-path is that it has no budget for either.
+
+    Returns ``DAY_DIR_READY`` when the directory is there,
+    ``DAY_DIR_UNSAFE`` when a component exists but is not a plain directory in
+    this workspace -- a symlink or junction, or a file or other object sitting
+    on the name -- and ``DAY_DIR_RETRYABLE`` for everything else.
+
+    ``DAY_DIR_RETRYABLE`` means only that nothing unsafe was found and SDP did
+    not create the directory. It does NOT mean a ``mkdir`` will succeed: an
+    absent cwd, a read-only filesystem and an unwritable parent all land here
+    too. The caller may attempt it once and must treat a failure as final,
+    because the turn that receives this has no budget for a second attempt.
+
+    The last one is not a milder version of the second, which is why they are
+    separate values. A reparse point here resolves somewhere else and the
+    snapshot is read back into the next context, so telling the model "create
+    it yourself" would walk it straight through the link this function just
+    refused, turning a control into an instruction to bypass it. A plain file
+    on the name is not an escape, but ``mkdir`` cannot fix it either, so the
+    same refusal is the right answer.
+
+    Every component is created and validated individually. ``parents=True``
+    would walk through a planted symlink without ever looking at it, and an
+    earlier revision that started at ``.private/precompact`` rather than at
+    ``.private`` failed outright on every project whose ``.private`` did not
+    exist yet.
+    """
+    if not cwd or not today:
+        return DAY_DIR_RETRYABLE
+    try:
+        root = Path(cwd)
+        if not root.is_dir():
+            return DAY_DIR_RETRYABLE
+    except (OSError, ValueError):
+        return DAY_DIR_RETRYABLE
+
+    base = root / SNAPSHOT_SUBDIR
+    chain = [root / SNAPSHOT_SUBDIR.parts[0]]
+    for part in SNAPSHOT_SUBDIR.parts[1:]:
+        chain.append(chain[-1] / part)
+    chain.append(base / today)
+
+    for part in chain:
+        try:
+            existed = part.exists()
+        except OSError:
+            return DAY_DIR_RETRYABLE
+        if not existed:
+            try:
+                part.mkdir(mode=0o700)
+            except FileExistsError:
+                pass  # a concurrent session got there first; validate it below
+            except OSError:
+                return DAY_DIR_RETRYABLE
+        # Validated whether it was found or just made: a component created a
+        # moment ago can still have been swapped, and the check is cheap.
+        try:
+            win_compat.reject_reparse_chain(root, part)
+        except OSError:
+            return DAY_DIR_UNSAFE
+        except (ValueError, RuntimeError):
+            return DAY_DIR_UNSAFE
+        try:
+            if not part.is_dir():
+                return DAY_DIR_UNSAFE
+        except OSError:
+            return DAY_DIR_RETRYABLE
+    return DAY_DIR_READY
 
 
 def list_snapshots(cwd: str | None) -> list:
@@ -1431,6 +1792,21 @@ def window_path(session_id: str) -> Path:
 
 
 WINDOW_PRUNE_SEC = 7 * 24 * 3600
+# Cycle ledger. Bounded so a long-lived home cannot grow it without limit;
+# past the cap the append is skipped rather than rotated, because losing a
+# measurement is cheaper than any failure mode of rotating under contention.
+CYCLES_BASENAME = "precompact-cycles.ndjson"
+MAX_CYCLE_ROW_BYTES = 4096
+MAX_CYCLES_BYTES = 4 * 1024 * 1024
+# How many measured snapshot turns are wanted before the Codex-side headroom
+# is set from data rather than from the provisional value. Agreed with the
+# Codex reviewer 2026-09-23; the statistic intended for it is
+# p99(turn_cost_upper_bound) plus the larger of 25% and 2000 tokens.
+CYCLES_FOR_THRESHOLD = 30
+# Bumped whenever the meaning of a recorded field changes. Rows from an
+# older revision are not comparable and must not be pooled with newer ones:
+# a headroom fitted across a definition change is fitted to an artefact.
+CYCLE_CONTRACT_REV = 2
 # Files that sit beside a marker but are not one. doctor must not report
 # them as pending snapshot requests, and the prune has to reach them or
 # they accumulate one per session forever.
@@ -1601,6 +1977,13 @@ def hook_stop() -> int:
 
     cwd = payload.get("cwd") or ""
     tag = session_tag(session_id)
+    today = time.strftime("%Y%m%d", time.localtime(now))
+    # Before the block, not after: the block text names this directory and
+    # forbids the command that would create it. What the block is allowed to
+    # CLAIM depends on whether that actually worked -- telling a model the
+    # directory exists when it does not, while forbidding mkdir, is a
+    # contradiction it has no budget to resolve.
+    day_dir = ensure_day_dir(cwd, today)
     # Everything already on disk is somebody else's. Recording it now is what
     # lets PreCompact tell "the file this session wrote" from "the newest file".
     # `marker` here is this session's expired marker, if any -- a live one
@@ -1621,6 +2004,10 @@ def hook_stop() -> int:
             "used_tokens": used,
             "context_limit": limit,
             "model": model,
+            # Recorded here, not derived at PreCompact: this is the reading the
+            # cost is measured FROM, and a later call can land on a different
+            # transcript format after a resume.
+            "host": measured_host(),
             "cwd": cwd,
             "tag": tag,
             "pre_existing": existing,
@@ -1631,14 +2018,117 @@ def hook_stop() -> int:
         # Without a marker nothing suppresses the next detection, so blocking
         # here would block again, and again. Stay silent instead.
         return 0
-    reason = BLOCK_REASON.format(
-        pct=pct,
-        threshold=threshold,
-        today=time.strftime("%Y%m%d", time.localtime(now)),
-        tag=tag,
-    )
+    if day_dir == DAY_DIR_UNSAFE:
+        reason = UNSAFE_DIR_REASON.format(pct=pct, threshold=threshold, cwd=cwd or ".")
+    else:
+        ready = day_dir == DAY_DIR_READY
+        reason = BLOCK_REASON.format(
+            pct=pct,
+            threshold=threshold,
+            today=today,
+            tag=tag,
+            dir_note=(DIR_READY_NOTE if ready else DIR_MISSING_NOTE),
+            mkdir_note=(MKDIR_BANNED_NOTE if ready else MKDIR_ALLOWED_NOTE),
+        )
     json.dump({"decision": "block", "reason": reason}, sys.stdout)
     return 0
+
+
+def _log_cycle(session_id, payload, marker, now, bound, path):
+    """Record what this precompact cycle cost, at the one moment it is known.
+
+    ``used_at_stop`` is what the Stop hook measured when it asked for the
+    snapshot; re-measuring here gives ``used_at_precompact``. Their difference
+    is what the Codex-side threshold needs and what nothing currently keeps --
+    clearing the marker throws it away.
+
+    Named ``turn_cost_upper_bound`` rather than a snapshot cost because that is
+    what it is. No hook runs when the file is written, so the second reading is
+    taken after the whole turn: the number bounds the write from above and is
+    safe to size a headroom with, but calling it the write's cost would be a
+    claim the data does not support.
+
+    It is only computed when the two readings are COMPARABLE: both present,
+    occupancy non-decreasing, and no known pair of host, window or model
+    disagreeing. That is deliberately weaker than "the same context epoch" --
+    a value missing on one side cannot disagree -- and the field is named for
+    the check it performs rather than for the property one might want it to
+    prove. Rows that fail it still record both readings and leave the bound
+    null, because knowing a cycle happened is worth more than a fabricated
+    number for it.
+
+    Host and window are recorded on every row. Without them the ledger mixes
+    Claude and Codex samples into one distribution, and a threshold set from
+    that distribution is set for neither. ``model`` is often "" on Codex: it is
+    stated on records that are usually out of the scanned tail, and inventing
+    one from the environment would say the wrong thing confidently.
+    """
+    used_at_stop = marker.get("used_tokens")
+    if not isinstance(used_at_stop, int):
+        used_at_stop = None
+    host_at_stop = marker.get("host") or ""
+    try:
+        _pct, used_now, limit_now, model_now, exact = measure_context(
+            payload.get("transcript_path"),
+            marker.get("cwd") or payload.get("cwd") or "",
+        )
+        host_now = measured_host()
+    except Exception:  # noqa: BLE001 - a measurement must never cost a compaction
+        used_now, limit_now, model_now, exact, host_now = 0, 0, "", False, ""
+    limit_at_stop = marker.get("context_limit") or 0
+
+    # What this does and does not prove. Both readings must exist, occupancy
+    # must not have gone backwards, and no KNOWN pair of host, window or model
+    # may disagree. Where a value is missing on one side it cannot disagree,
+    # and that is a weaker test than "the epoch is the same" -- Codex states no
+    # model in the scanned tail, so the model check is usually vacuous there.
+    # The flag is therefore named for the comparison it performs; a reader
+    # deciding a threshold from these rows should know the guarantee is
+    # "nothing observable contradicts it", not "proven identical".
+    def _agrees(a, b):
+        return not a or not b or a == b
+
+    comparable = (
+        isinstance(used_at_stop, int)
+        and bool(used_now)
+        and used_now >= used_at_stop
+        and _agrees(host_at_stop, host_now)
+        and _agrees(limit_at_stop, limit_now)
+        and _agrees(marker.get("model") or "", model_now or "")
+    )
+    row = {
+        "contract_rev": CYCLE_CONTRACT_REV,
+        "at": round(now, 3),
+        "session": _safe_session(session_id),
+        "trigger": payload.get("trigger") or "unknown",
+        "requested": bool(marker),
+        "host": host_now or host_at_stop or "",
+        "host_at_stop": host_at_stop,
+        "model_at_stop": marker.get("model") or "",
+        "model_at_precompact": model_now or "",
+        # Three fields, not one with fallbacks. doctor groups on the stop-time
+        # window, and a field that silently borrows the other end's value
+        # produces groups describing no real session. "context_limit" is kept
+        # for readers that only want a number and is explicitly NOT what the
+        # grouping reads.
+        "context_limit_at_stop": limit_at_stop or 0,
+        "context_limit_at_precompact": limit_now or 0,
+        "context_limit": limit_at_stop or limit_now or 0,
+        "limit_exact": bool(exact),
+        "used_at_stop": used_at_stop,
+        "used_at_precompact": used_now or None,
+        "turn_cost_upper_bound": (used_now - used_at_stop) if comparable else None,
+        "comparable_measurement": bool(comparable),
+        "pct_at_stop": marker.get("pct"),
+        "pct_at_precompact": (
+            round(used_now / limit_now * 100.0, 2) if used_now and limit_now else None
+        ),
+        "outcome": "bound" if bound else "missing",
+        # The name only. The path is the user's working tree, and a ledger in
+        # the home directory is the wrong place to accumulate one.
+        "snapshot": Path(path).name if path else "",
+    }
+    record_cycle(row)
 
 
 def hook_precompact() -> int:
@@ -1673,6 +2163,7 @@ def hook_precompact() -> int:
         record["cwd"] = marker.get("cwd") or payload.get("cwd") or ""
         record["snapshot"] = stated
         write_marker(session_id, record)
+        _log_cycle(session_id, payload, marker, now, bound=True, path=stated)
         return 0
 
     if marker.get("state") == "pending":
@@ -1711,7 +2202,10 @@ def hook_precompact() -> int:
 
     snapshot = find_snapshot(cwd, floor, tag, exclude, allow_recency)
     if snapshot is None and not marker:
+        # Nothing was asked for and nothing is bound: not a cycle, so not a row.
         return 0
+    _log_cycle(session_id, payload, marker, now, bound=snapshot is not None,
+               path=snapshot or "")
 
     record = dict(marker)
     record["state"] = "snapshotted"
@@ -2080,6 +2574,64 @@ def cmd_doctor() -> int:
     # The state directory must be writable or the Stop hook cannot record a
     # marker, and an unrecorded marker means it stays silent rather than
     # blocking repeatedly. Silent is safe but it is also invisible, so probe it.
+    # Cycle history. Reported because the Codex-side threshold is meant to be
+    # set from these rows and cannot be set without them (KNOWN_GAPS NC-34),
+    # and because a run of "missing" is the one symptom of a threshold with no
+    # headroom left -- which is otherwise invisible until a snapshot is lost.
+    rows = read_cycles()
+    if rows:
+        out("cycle ledger      : %s\n" % cycles_path())
+        current = [r for r in rows if r.get("contract_rev") == CYCLE_CONTRACT_REV]
+        stale = len(rows) - len(current)
+        out("cycles recorded   : %d usable, %d from an older contract revision\n"
+            % (len(current), stale))
+        # Grouped, never pooled. A headroom fitted across two hosts is fitted to
+        # neither: the whole finding behind NC-34 is that Claude and Codex
+        # compact at different points in the same percentage scale.
+        # Keyed on the STOP-time readings alone. "host" and "context_limit"
+        # each fall back to the other end of the cycle when their own side is
+        # missing, so a row whose two ends disagree would be filed under one
+        # end's host and the other's window -- a group that describes no real
+        # session. The threshold is read off these counts, so a row in the
+        # wrong group is worse than a row in no group.
+        groups: dict = {}
+        unattributable = 0
+        for r in current:
+            if not r.get("requested"):
+                continue
+            host = r.get("host_at_stop") or ""
+            limit = r.get("context_limit_at_stop") or 0
+            if not host or not limit:
+                unattributable += 1
+                continue
+            g = groups.setdefault((host, limit), {"n": 0, "missing": 0, "costs": []})
+            g["n"] += 1
+            if r.get("outcome") == "missing":
+                g["missing"] += 1
+            cost = r.get("turn_cost_upper_bound")
+            if isinstance(cost, int) and r.get("comparable_measurement"):
+                g["costs"].append(cost)
+        if unattributable:
+            out("  %d requested cycle(s) name no host or window and are grouped nowhere\n"
+                % unattributable)
+        if not groups:
+            out("        no attributable hook-requested cycles yet\n")
+        for (host, limit), g in sorted(groups.items()):
+            out("  %-7s window %-8s: %d requested, %d lost the snapshot\n"
+                % (host, limit or "?", g["n"], g["missing"]))
+            costs = sorted(g["costs"])
+            if not costs:
+                out("        no comparable cost samples\n")
+                continue
+            out("        turn cost upper bound: n=%d  min %d  median %d  max %d\n"
+                % (len(costs), costs[0], costs[len(costs) // 2], costs[-1]))
+            if len(costs) < CYCLES_FOR_THRESHOLD:
+                out("        %d of %d samples -- not enough to set a headroom from.\n"
+                    % (len(costs), CYCLES_FOR_THRESHOLD))
+                out("        The provisional threshold stands. See KNOWN_GAPS NC-34.\n")
+    else:
+        out("cycle ledger      : none yet (%s)\n" % cycles_path())
+
     probe = state_dir() / ".doctor-probe.json"
     if _write_json(probe, {"probe": True}):
         out("state dir writable: yes\n")
@@ -2124,6 +2676,10 @@ def cmd_doctor() -> int:
                 for entry in state_dir().iterdir()
                 if entry.name.endswith(".json")
                 and not entry.name.endswith(SIDECAR_SUFFIXES)
+                # Named explicitly rather than relying on ".ndjson" not ending
+                # in ".json". It does not, but a reader should not have to
+                # verify that to know the ledger is not a pending marker.
+                and entry.name != CYCLES_BASENAME
             )
         except OSError:
             markers = []

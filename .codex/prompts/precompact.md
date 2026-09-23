@@ -9,7 +9,17 @@ Create a gitignored snapshot of current in-progress work before manual compact, 
 - If two or more topics are plausible, do not guess. List candidates one per line, ask the user to choose, then wait.
 - Use the topic only as a filename slug. Keep it short, for example `B`, `mtls`, or `f30`. Restrict it to `[A-Za-z0-9._-]` (no slashes, spaces, or non-ASCII) so the snapshot path stays portable.
 
+## Automation fast-path
+
+The `Stop` hook can ask for a snapshot on its own past the threshold. **That request is not this workflow.** Its text is the whole contract: write the file from what is already in the conversation, and run nothing to prepare it -- no `git`, no `gh`, no `ssh`, no reads, no searches, no agent or task listings, and do not open this file or the skill.
+
+The reason is a budget. The block buys one more turn and a compaction can land inside it. Measured 2026-09-23 on a Codex session, window 258400: the block landed at 81.6%, the host compacted at 83.1%, so the turn was worth about 2800 tokens. The turn spent 3960 preparing -- 840 re-reading the skill, 2558 on an agent listing, 562 on the `git`/`gh`/`ssh` fan-out that step 1 asks for -- and no snapshot was written. Keep the six sections, write `unknown` wherever the conversation does not already hold the fact, and never invent one to avoid an `unknown`. Write the file, then stop: no resume prompt, no queued compaction, no commit, at most one short line of chat.
+
+Everything below is the **manual** path, for when a person asks and there is context to spare.
+
 ## Workflow
+
+Manual path only; on the automated path skip step 1 entirely.
 
 1. Gather measured context. Do not rely on memory: in-progress work, completed work in this session (`git log --oneline origin/<branch>..HEAD` plus changed files), current diff, remaining steps, open or edited files with line references, pitfalls already hit, and open questions. If data is unavailable, write `unknown`. Leave no blank sections.
 2. Save the in-progress snapshot to `.private/precompact/{YYYYMMDD}/precompact_{topic}.md`. If the request came from the host automation it names a session tag and asks for `precompact_{topic}_{tag}.md`; use that exact name, since it is what tells two sessions writing into the same directory apart.

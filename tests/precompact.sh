@@ -26,6 +26,10 @@ export SDP_PRECOMPACT_SELFTEST=1
 SELFTEST_HOME="$(python3 -c 'import os,pwd;print(pwd.getpwuid(os.getuid()).pw_dir)')/.sdp/selftest-$$"
 mkdir -p "$SELFTEST_HOME"
 export SDP_PRECOMPACT_SETTINGS="$SELFTEST_HOME/absent-settings.json"
+# The ledger is append-only and shared, so unlike a marker it cannot be swept
+# by session-id pattern afterwards. Redirect it for the whole suite or every
+# run files its fixtures as the developer's real measurement history.
+export SDP_PRECOMPACT_CYCLES="$SELFTEST_HOME/cycles.ndjson"
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf 'ok   - %s\n' "$1"; }
@@ -1846,9 +1850,13 @@ PY
 # generated. Those two are the ones Codex actually reads, and a round that
 # updated only the generated four left them describing the old, non-queueing
 # flow while the suite stayed green -- which is exactly how this was missed.
+# SKILL.md is now a router: a matched skill is read in full, so the manual
+# procedure lives in manual.md beside it and is loaded only when a person asks.
+# These guards follow the content to its new home rather than being dropped --
+# the queueing contract still has to be stated everywhere it ships.
 for f in commands/precompact.md plugins/sdp/commands/precompact.md \
-         skills/precompact/SKILL.md plugins/sdp/skills/precompact/SKILL.md \
-         .agents/skills/precompact/SKILL.md .codex/prompts/precompact.md; do
+         skills/precompact/manual.md plugins/sdp/skills/precompact/manual.md \
+         .agents/skills/precompact/manual.md .codex/prompts/precompact.md; do
   grep -qF 'precompact_hook.py" compact' "$f" \
     && ok "$f tells the command to queue the compaction" \
     || bad "$f omits the compact step"
@@ -1881,8 +1889,10 @@ python3 - <<'PY' && ok "every shipped command and skill copy resolves the plugin
 import pathlib, sys
 copies = [
     "plugins/sdp/commands/precompact.md", "plugins/sdp/skills/precompact/SKILL.md",
+    "plugins/sdp/skills/precompact/manual.md", "skills/precompact/manual.md",
     "commands/precompact.md", "skills/precompact/SKILL.md",
-    ".agents/skills/precompact/SKILL.md", ".codex/prompts/precompact.md",
+    ".agents/skills/precompact/SKILL.md", ".agents/skills/precompact/manual.md",
+    ".codex/prompts/precompact.md",
 ]
 problems = []
 for rel in copies:
@@ -1971,7 +1981,9 @@ out="$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","stop_hook_a
 # quietly stops people enabling the thing.
 for f in commands/precompact.md plugins/sdp/commands/precompact.md \
          skills/precompact/SKILL.md plugins/sdp/skills/precompact/SKILL.md \
-         .agents/skills/precompact/SKILL.md .codex/prompts/precompact.md \
+         skills/precompact/manual.md plugins/sdp/skills/precompact/manual.md \
+         .agents/skills/precompact/SKILL.md .agents/skills/precompact/manual.md \
+         .codex/prompts/precompact.md \
          COMMAND_MANUAL.md COMMAND_MANUAL.ko.md; do
   if grep -qiE "Codex does not expose|Codex는 이 라이프사이클 훅을 제공하지 않" "$f"; then
     bad "$f still claims Codex has no lifecycle hooks"
@@ -2008,6 +2020,399 @@ grep -q '가장 최근' COMMAND_MANUAL.ko.md \
   && ok "COMMAND_MANUAL.ko.md states the usage/window pairing rule" \
   || bad "COMMAND_MANUAL.ko.md does not state the usage/window pairing rule"
 
+# ------------------------------------------- automation fast-path (NC-34) --
+
+# The block text is the only contract the automated path gets. It is the whole
+# fix for the 2026-09-23 loss: the snapshot turn was worth ~2800 tokens and
+# spent 3960 preparing, 3398 of which were the skill re-read plus an agent
+# listing. If this text stops forbidding preparation, that failure returns and
+# nothing else catches it -- the cost is invisible until a snapshot is missing.
+reason="$(python3 - <<'PYEOF'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+print(h.BLOCK_REASON.format(pct=81.6, threshold=78.0, today="20260923", tag="tag1",
+                            dir_note=h.DIR_READY_NOTE,
+                              mkdir_note=h.MKDIR_BANNED_NOTE))
+PYEOF
+)"
+
+# The block must not NAME the skill: on Codex a matched skill is read in full,
+# so a mention is an invitation to spend the budget the text is rationing.
+case "$reason" in
+  *skill*) bad "BLOCK_REASON names the skill, which invites the full read it forbids" ;;
+  *)       ok "BLOCK_REASON does not name the skill" ;;
+esac
+for phrase in "Run no commands" "open no files" "unknown" "MANUAL procedure"; do
+  case "$reason" in
+    *"$phrase"*) ok "BLOCK_REASON states: $phrase" ;;
+    *)           bad "BLOCK_REASON no longer states: $phrase" ;;
+  esac
+done
+# The six sections have to survive the budget, or the fast-path trades a lost
+# snapshot for a useless one.
+for sec in "0 Current Work" "2 Remaining" "5 Open Questions"; do
+  case "$reason" in
+    *"$sec"*) ok "BLOCK_REASON keeps section $sec" ;;
+    *)        bad "BLOCK_REASON dropped section $sec" ;;
+  esac
+done
+case "$reason" in
+  *"precompact_{topic}_tag1.md"*) ok "BLOCK_REASON still carries the session tag in the path" ;;
+  *) bad "BLOCK_REASON lost the session tag; snapshots cannot be bound" ;;
+esac
+
+# Both trees' skills must carry the fast-path, and it must come BEFORE the
+# numbered workflow -- a model that reaches step 1 first has already paid.
+# A matched skill is read in full on Codex, so the router's SIZE is the thing
+# under test. 10.9KB was the measured cost that broke the fast-path; the router
+# must stay small enough that being read in full is affordable.
+for sk in skills/precompact/SKILL.md plugins/sdp/skills/precompact/SKILL.md \
+          .agents/skills/precompact/SKILL.md; do
+  if grep -q "## Automation fast-path" "$sk"; then
+    ok "$sk carries the fast-path"
+  else
+    bad "$sk has no ## Automation fast-path section"
+  fi
+  sz="$(wc -c < "$sk" | tr -d ' ')"
+  [ "$sz" -le 4096 ] \
+    && ok "$sk is $sz bytes, small enough to be read in full" \
+    || bad "$sk is $sz bytes; a matched skill is read in full and this is the cost"
+  # The manual procedure must NOT be in the router, or splitting it bought
+  # nothing.
+  grep -q "Gather measured context" "$sk" \
+    && bad "$sk still carries the manual gathering step" \
+    || ok "$sk keeps the manual gathering step out of the router"
+  # The refusal branch must be reached BEFORE the write instruction. When the
+  # block says REFUSED it deliberately withholds the path, the tag and the
+  # sections; a router that says "write it NOW" first hands all of that back
+  # and the refusal becomes advice the model has already acted against.
+  ref_ln="$(grep -n 'REFUSED' "$sk" | head -1 | cut -d: -f1)"
+  wr_ln="$(grep -n 'precompact_{topic}_{tag}.md' "$sk" | head -1 | cut -d: -f1)"
+  if [ -n "$ref_ln" ] && [ -n "$wr_ln" ] && [ "$ref_ln" -lt "$wr_ln" ]; then
+    ok "$sk checks for a refused location before instructing a write"
+  else
+    bad "$sk instructs the write before the refusal check (refused=$ref_ln write=$wr_ln)"
+  fi
+  grep -q "Nothing below applies" "$sk" \
+    && ok "$sk stops the fast-path on a refused location" \
+    || bad "$sk lets the fast-path continue past a refused location"
+  man="$(dirname "$sk")/manual.md"
+  [ -f "$man" ] && grep -q "Gather measured context" "$man" \
+    && ok "$man holds the manual gathering step" \
+    || bad "$man is missing or does not hold the manual gathering step"
+done
+
+# The skill ships at four paths. Two of them -- .agents/ and .codex/prompts/ --
+# are NOT produced by build_plugin_tree.py, so a change to the canonical copy
+# leaves them behind silently. That is not hypothetical: the fast-path fix
+# landed in both generated trees and missed .agents/, which is the copy the
+# Codex session that lost its snapshot actually reads. A guard is the only
+# thing standing between "fixed" and "fixed on the host that was already fine".
+for leaf in SKILL.md manual.md; do
+  if diff -q "plugins/sdp/skills/precompact/$leaf" ".agents/skills/precompact/$leaf" >/dev/null 2>&1; then
+    ok ".agents/ copy of $leaf is byte-identical to the canonical one"
+  else
+    bad ".agents/skills/precompact/$leaf has drifted from plugins/sdp/ (not auto-generated)"
+  fi
+done
+grep -q "## Automation fast-path" .codex/prompts/precompact.md \
+  && ok ".codex/prompts/precompact.md carries the fast-path" \
+  || bad ".codex/prompts/precompact.md still sends the automated path through step 1"
+# Order matters there too: a model that reaches the gathering step first has
+# already spent the budget the fast-path was meant to protect.
+cfp="$(grep -n '^## Automation fast-path' .codex/prompts/precompact.md | cut -d: -f1)"
+cwf="$(grep -n '^## Workflow' .codex/prompts/precompact.md | cut -d: -f1)"
+[ -n "$cfp" ] && [ -n "$cwf" ] && [ "$cfp" -lt "$cwf" ] \
+  && ok ".codex/prompts/precompact.md puts the fast-path ahead of the workflow" \
+  || bad ".codex/prompts/precompact.md has the fast-path at or after ## Workflow"
+
+# The block forbids mkdir, so the hook has to have made the directory -- and
+# the very first snapshot of a project is the case where it does not exist yet.
+# An earlier revision started the chain at .private/precompact and left every
+# fresh project failing, while the block still advertised the directory.
+if python3 - <<'PYEOF'
+import os, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+problems = []
+
+fresh = pathlib.Path(tempfile.mkdtemp())
+if h.ensure_day_dir(str(fresh), "20260923") != h.DAY_DIR_READY:
+    problems.append("a project with no .private was not made ready")
+if not (fresh / ".private" / "precompact" / "20260923").is_dir():
+    problems.append("the day directory was not created in a fresh project")
+
+# Idempotent: the hook runs on every crossing, not only the first.
+if h.ensure_day_dir(str(fresh), "20260923") != h.DAY_DIR_READY:
+    problems.append("a second call failed on an existing directory")
+
+# A reparse point anywhere in the chain must be UNSAFE, not merely
+# "creatable". The two get opposite instructions: creatable tells the model to
+# mkdir the path itself, which on a refused path would walk it straight
+# through the link this function just rejected and write the snapshot outside
+# the workspace -- where the resume text then reads it back from.
+for component in (".private", ".private/precompact"):
+    elsewhere = pathlib.Path(tempfile.mkdtemp())
+    linked = pathlib.Path(tempfile.mkdtemp())
+    target = linked / component
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.symlink_to(elsewhere, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        continue
+    got = h.ensure_day_dir(str(linked), "20260923")
+    if got != h.DAY_DIR_UNSAFE:
+        problems.append("a symlinked %s returned %r, not unsafe" % (component, got))
+
+# A cwd that does not exist is RETRYABLE, not unsafe: nothing was refused. The
+# same value covers an unwritable parent, which is why the block text tells the
+# model to try the mkdir once and treat failure as final rather than promising
+# it will work.
+if h.ensure_day_dir(str(fresh / "nope"), "20260923") != h.DAY_DIR_RETRYABLE:
+    problems.append("a missing cwd was not reported as retryable")
+if (h.ensure_day_dir("", "20260923") != h.DAY_DIR_RETRYABLE
+        or h.ensure_day_dir(str(fresh), "") != h.DAY_DIR_RETRYABLE):
+    problems.append("empty arguments were not reported as retryable")
+
+# An unwritable parent is RETRYABLE, not unsafe and not ready: nothing about it
+# is a security refusal, and nothing about it promises a mkdir will work.
+denied = pathlib.Path(tempfile.mkdtemp())
+denied.chmod(0o500)
+try:
+    got = h.ensure_day_dir(str(denied), "20260923")
+    if got != h.DAY_DIR_RETRYABLE:
+        problems.append("an unwritable parent returned %r" % got)
+finally:
+    denied.chmod(0o700)
+
+# The refused path gets its own text: no path to write, no tag, no sections,
+# and no permission to create anything.
+unsafe = h.UNSAFE_DIR_REASON.format(pct=82, threshold=78, cwd=str(linked))
+for phrase in ("REFUSED", "Do not write a snapshot", "must not create"):
+    if phrase not in unsafe:
+        problems.append("the refused-location text omits %r" % phrase)
+if "only command allowed" in unsafe:
+    problems.append("the refused-location text still permits a mkdir")
+# The fallback must not promise the mkdir works, and must forbid a second try.
+if "do not retry" not in h.DIR_MISSING_NOTE.lower():
+    problems.append("the fallback text does not forbid retrying a failed mkdir")
+# UNSAFE also covers a plain file sitting on the name, which is not a link and
+# does not resolve anywhere else. The text must not diagnose a cause it cannot
+# know from the return value alone.
+blocked = pathlib.Path(tempfile.mkdtemp())
+(blocked / ".private").write_text("not a directory", encoding="utf-8")
+if h.ensure_day_dir(str(blocked), "20260923") != h.DAY_DIR_UNSAFE:
+    problems.append("a plain file on .private was not refused")
+if "or a file or other object" not in unsafe:
+    problems.append("the refused-location text names only links as the cause")
+
+
+for prob in problems:
+    print("FAIL -", prob)
+raise SystemExit(1 if problems else 0)
+PYEOF
+then ok "the day directory is created for a fresh project, idempotently, and refuses a link"
+else bad "ensure_day_dir: see the FAIL lines above"
+fi
+
+# The two block texts must not both claim the directory exists. Telling a model
+# the directory is there while forbidding mkdir is a contradiction it has no
+# budget to resolve -- that is the whole reason the note is conditional.
+if python3 - <<'PYEOF'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+problems = []
+ready = h.BLOCK_REASON.format(pct=82, threshold=78, today="20260923", tag="t1",
+                              dir_note=h.DIR_READY_NOTE,
+                              mkdir_note=h.MKDIR_BANNED_NOTE)
+missing = h.BLOCK_REASON.format(pct=82, threshold=78, today="20260923", tag="t1",
+                                dir_note=h.DIR_MISSING_NOTE,
+                                mkdir_note=h.MKDIR_ALLOWED_NOTE)
+if "already exists" not in ready:
+    problems.append("the ready text does not say the directory exists")
+if "no mkdir" not in ready.lower():
+    problems.append("the ready text does not forbid mkdir")
+if "already exists" in missing:
+    problems.append("the fallback text still claims the directory exists")
+if "only command allowed" not in missing or "Try ONE mkdir" not in missing:
+    problems.append("the fallback text does not permit the one mkdir it requires")
+if "do not retry" not in missing.lower():
+    problems.append("the fallback text does not forbid a second mkdir attempt")
+if "skill" in ready.lower() or "skill" in missing.lower():
+    problems.append("a block text names the skill, inviting the full read it forbids")
+for prob in problems:
+    print("FAIL -", prob)
+raise SystemExit(1 if problems else 0)
+PYEOF
+then ok "the block text matches whether the directory was actually created"
+else bad "block text / directory state mismatch: see the FAIL lines above"
+fi
+
+# ---------------------------------------------- cycle ledger (NC-34) --
+
+# The ledger is the only record of what a snapshot turn cost; the marker that
+# holds used_at_stop is deleted when the cycle closes. Without these rows the
+# Codex-side threshold stays provisional forever, so the append has to work and
+# has to be honest about the outcome.
+if python3 - <<'PYEOF'
+import json, os, pathlib, sys, tempfile, time
+sys.path.insert(0, str(pathlib.Path("plugins/sdp/scripts").resolve()))
+import precompact_hook as h
+home = pathlib.Path(h.win_compat.passwd_home())
+tmp = pathlib.Path(tempfile.mkdtemp(dir=str(home / ".sdp")))
+os.environ["SDP_PRECOMPACT_SELFTEST"] = "1"
+os.environ["SDP_PRECOMPACT_STATE_DIR"] = str(tmp)
+# This case owns its ledger: the suite-wide seam points every other case at one
+# shared file, and counting rows here would then count theirs too.
+os.environ["SDP_PRECOMPACT_CYCLES"] = str(tmp / "cycles.ndjson")
+problems = []
+
+if h.cycles_path().parent != tmp:
+    problems.append("the ledger ignored its override: %s" % h.cycles_path())
+# With the override removed it must fall back INTO the state directory, not to
+# the home directory it originally used.
+del os.environ["SDP_PRECOMPACT_CYCLES"]
+if h.cycles_path() != tmp / h.CYCLES_BASENAME:
+    problems.append("the default ledger path left the state dir: %s" % h.cycles_path())
+os.environ["SDP_PRECOMPACT_CYCLES"] = str(tmp / "cycles.ndjson")
+
+# A real Codex rollout tail, in the shape measure_context actually parses, so
+# the cost below is measured rather than asserted to be None. The numbers are
+# the 2026-09-23 incident: the block landed at 210863 of a 258400 window and
+# the turn had reached 214823 by the time PreCompact fired.
+roll = tmp / "rollout-2026-09-23T00-00-00-fixture.jsonl"
+def tc(used):
+    return json.dumps({
+        "type": "event_msg",
+        "payload": {"type": "token_count", "info": {
+            "model_context_window": 258400,
+            "last_token_usage": {"input_tokens": used},
+        }},
+    })
+roll.write_text("\n".join([
+    json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp)}}),
+    tc(202571), tc(210863), tc(214823),
+]) + "\n", encoding="utf-8")
+
+pct, used, limit, model, exact = h.measure_context(str(roll), str(tmp))
+if (used, limit, exact) != (214823, 258400, True):
+    problems.append("the fixture did not measure as a Codex rollout: %r" % ((used, limit, exact),))
+if h.measured_host() != "codex":
+    problems.append("host was not detected as codex: %r" % h.measured_host())
+
+now = time.time()
+marker = {"used_tokens": 210863, "context_limit": 258400, "pct": 81.6,
+          "model": "gpt-5.6-sol", "host": "codex", "cwd": str(tmp)}
+h._log_cycle("sid-a", {"trigger": "auto", "transcript_path": str(roll)}, marker, now,
+             bound=False, path="")
+
+# A cycle whose two readings come from different windows: a model switch, or a
+# compaction in between. The difference is meaningless and must not be stored.
+h._log_cycle("sid-c", {"trigger": "auto", "transcript_path": str(roll)},
+             dict(marker, context_limit=1000000, host="claude"), now,
+             bound=True, path=str(tmp / "precompact_x_sid-c.md"))
+
+# No Stop request at all: a plain manual compaction. Recorded, but not counted.
+h._log_cycle("sid-b", {"trigger": "manual", "transcript_path": ""}, {}, now,
+             bound=True, path=str(tmp / "precompact_x_sid-b.md"))
+
+rows = h.read_cycles()
+if len(rows) != 3:
+    problems.append("expected 3 rows, got %d" % len(rows))
+else:
+    a, c, b = rows
+    if a["turn_cost_upper_bound"] != 214823 - 210863:
+        problems.append("the measured turn cost was not recorded: %r"
+                        % a["turn_cost_upper_bound"])
+    if a["comparable_measurement"] is not True:
+        problems.append("a same-window cycle was not treated as comparable")
+    if a["host"] != "codex":
+        problems.append("host was not carried onto the row: %r" % a["host"])
+    if a["context_limit"] != 258400:
+        problems.append("window was not carried onto the row: %r" % a["context_limit"])
+    if a["outcome"] != "missing":
+        problems.append("an unbound cycle was not recorded as missing: %r" % a["outcome"])
+    if a["used_at_stop"] != 210863:
+        problems.append("used_at_stop was not carried from the marker: %r" % a["used_at_stop"])
+    if a["contract_rev"] != h.CYCLE_CONTRACT_REV:
+        problems.append("the row is not stamped with the contract revision")
+    if c["turn_cost_upper_bound"] is not None or c["comparable_measurement"]:
+        problems.append("a cross-epoch cycle recorded a cost: %r"
+                        % c["turn_cost_upper_bound"])
+    if b["requested"] is not False:
+        problems.append("a cycle with no marker was marked requested")
+    if b["used_at_stop"] is not None:
+        problems.append("used_at_stop was invented for a cycle with no marker")
+    if "/" in (b["snapshot"] or ""):
+        problems.append("the ledger stored a full working-tree path: %r" % b["snapshot"])
+
+# The stop-time window must be its own field: doctor groups on it, and a value
+# borrowed from the other end of the cycle files the row under a session that
+# never existed.
+h._log_cycle("sid-w", {"trigger": "auto", "transcript_path": str(roll)},
+             {"used_tokens": 1, "pct": 1.0, "cwd": str(tmp)}, now,
+             bound=True, path="x.md")
+wrow = h.read_cycles()[-1]
+if wrow.get("context_limit_at_stop") != 0:
+    problems.append("a missing stop-time window was filled in from PreCompact: %r"
+                    % wrow.get("context_limit_at_stop"))
+if wrow.get("context_limit_at_precompact") != 258400:
+    problems.append("the PreCompact window was not recorded separately: %r"
+                    % wrow.get("context_limit_at_precompact"))
+
+# An oversized row is dropped, not truncated and not raised.
+if h.record_cycle({"junk": "x" * (h.MAX_CYCLE_ROW_BYTES + 10)}):
+    problems.append("an oversized row was appended")
+if len(h.read_cycles()) != 4:
+    problems.append("an oversized row changed the ledger")
+
+# 0600 is enforced on the descriptor, not left to whatever the file already had.
+h.cycles_path().chmod(0o644)
+h.record_cycle({"at": 1})
+mode = h.cycles_path().stat().st_mode & 0o777
+if mode != 0o600:
+    problems.append("a pre-existing wide mode survived the append: %s" % oct(mode))
+
+# Refusals must not leak the descriptor they opened.
+opened = len(os.listdir("/dev/fd")) if os.path.isdir("/dev/fd") else None
+if opened is not None:
+    saved = h.MAX_CYCLES_BYTES
+    h.MAX_CYCLES_BYTES = 1
+    for _ in range(200):
+        h.record_cycle({"at": 2})
+    h.MAX_CYCLES_BYTES = saved
+    if len(os.listdir("/dev/fd")) - opened > 2:
+        problems.append("refused appends leaked file descriptors")
+
+# A ledger that cannot be written must not cost a compaction.
+h.cycles_path().unlink()
+h.cycles_path().mkdir()
+if h.record_cycle({"at": 1}):
+    problems.append("record_cycle claimed success against a directory")
+if h.read_cycles():
+    problems.append("read_cycles returned rows for a directory")
+
+for prob in problems:
+    print("FAIL -", prob)
+raise SystemExit(1 if problems else 0)
+PYEOF
+then ok "cycle ledger records cost, outcome and provenance, and fails closed"
+else bad "cycle ledger: see the FAIL lines above"
+fi
+
+# doctor has to surface the sample count, or nobody learns the threshold is
+# still provisional.
+grep -q "CYCLES_FOR_THRESHOLD" "$HOOK_CANONICAL" \
+  && ok "the sample count needed for a measured headroom is named in code" \
+  || bad "CYCLES_FOR_THRESHOLD is gone; the provisional threshold has no exit"
+
+grep -q "NC-34" docs/KNOWN_GAPS.md \
+  && ok "NC-34 records why the Codex threshold is still provisional" \
+  || bad "NC-34 is missing from KNOWN_GAPS"
+
 # ------------------------------------------------------------------ doctor --
 
 # doctor must be non-zero when the automation is not armed. A health check that
@@ -2022,6 +2427,16 @@ SDP_PRECOMPACT_MODE=auto python3 "$HOOK_CANONICAL" doctor >/dev/null 2>&1
 
 mode="$(SDP_PRECOMPACT_MODE=auto python3 "$HOOK_CANONICAL" config get 2>/dev/null)"
 [ "$mode" = "auto" ] && ok "config get reports the resolved mode" || bad "config get reported '$mode'"
+
+# Standing guard on the seam above. A suite that writes into the user's real
+# ledger corrupts the very distribution the threshold is meant to be set from,
+# and it does so silently -- the rows look exactly like real ones.
+REAL_LEDGER="$SELFTEST_STATE/precompact-cycles.ndjson"
+if [ -s "$REAL_LEDGER" ] && grep -q 'sdp-precompact-selftest-' "$REAL_LEDGER" 2>/dev/null; then
+  bad "the suite wrote fixture rows into the real cycle ledger: $REAL_LEDGER"
+else
+  ok "the real cycle ledger carries no fixture rows"
+fi
 
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

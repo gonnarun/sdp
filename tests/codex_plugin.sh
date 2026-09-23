@@ -83,12 +83,18 @@ for skill in precompact; do
   f="$PLUGIN/skills/$skill/SKILL.md"
   if [ ! -f "$f" ]; then bad "Codex utility skill missing: $skill"; continue; fi
   grep -q "^name: $skill$" "$f" && ok "Codex utility skill present: $skill" || bad "Codex utility skill name mismatch: $skill"
-  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}.md' "$f" && ok "$skill skill defines private snapshot file pattern" || bad "$skill skill missing private snapshot file pattern"
+  # The router states the AUTOMATED form, which carries the session tag; the
+  # manual form without it moved to manual.md when SKILL.md was cut down to a
+  # router (a matched skill is read in full, so its size is a per-snapshot cost).
+  # Both are still required, just not in the same file.
+  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}_{tag}.md' "$f" && ok "$skill skill defines the tagged snapshot file pattern" || bad "$skill skill missing tagged snapshot file pattern"
+  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}.md' "$PLUGIN/skills/$skill/manual.md" && ok "$skill manual defines private snapshot file pattern" || bad "$skill manual missing private snapshot file pattern"
 
   rf="skills/$skill/SKILL.md"
   if [ ! -f "$rf" ]; then bad "Root Codex utility skill missing: $skill"; continue; fi
   grep -q "^name: $skill$" "$rf" && ok "Root Codex utility skill present: $skill" || bad "Root Codex utility skill name mismatch: $skill"
-  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}.md' "$rf" && ok "Root $skill skill defines private snapshot file pattern" || bad "Root $skill skill missing private snapshot file pattern"
+  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}_{tag}.md' "$rf" && ok "Root $skill skill defines the tagged snapshot file pattern" || bad "Root $skill skill missing tagged snapshot file pattern"
+  grep -qF '.private/precompact/{YYYYMMDD}/precompact_{topic}.md' "skills/$skill/manual.md" && ok "Root $skill manual defines private snapshot file pattern" || bad "Root $skill manual missing private snapshot file pattern"
 done
 
 [ -f "commands/precompact.md" ] && ok "Claude command present: precompact" || bad "Claude command missing: precompact"
