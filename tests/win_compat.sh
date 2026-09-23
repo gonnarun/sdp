@@ -893,6 +893,21 @@ for tree in (root / "hooks", root / "plugins" / "sdp" / "hooks"):
     # which a Windows host need not have), and no python3 assumption.
     entries = [h for ev in claude["hooks"].values() for grp in ev for h in grp["hooks"]]
     check(len(entries) == 3, "W18[%s]: Claude manifest still declares three hooks" % label)
+
+    # Claude Code validates the TOP LEVEL too, as of 2.1.278: keys outside
+    # {$schema, description, hooks, modules, surface} produce
+    # "hooks.json: unknown key ... ignored" on every session start in every repo
+    # that installs the plugin. The hooks still load -- it is a warning, not a
+    # rejection, unlike the Codex side below -- but it is user-visible noise, and
+    # a top-level key set the host does not know is exactly what cost a working
+    # gate there. `description` is the one comment-carrying key both hosts accept.
+    check(set(claude) <= {"$schema", "description", "hooks", "modules", "surface"},
+          "W18[%s]: the Claude manifest's top level uses only keys Claude Code accepts (has %s)"
+          % (label, sorted(claude)))
+    # Matcher entries are validated against {matcher, hooks} by the same pass.
+    check(all(set(grp) <= {"matcher", "hooks"}
+              for ev in claude["hooks"].values() for grp in ev),
+          "W18[%s]: every Claude matcher entry uses only matcher/hooks" % label)
     check(all(e.get("shell") == "bash" for e in entries),
           "W18[%s]: every Claude hook sets shell=bash so the host picks Git Bash" % label)
     check(all("args" not in e for e in entries),

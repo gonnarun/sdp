@@ -1,5 +1,5 @@
 {
-  "_comment": "Claude Code only. Codex reads hooks/hooks.codex.json, declared in .codex-plugin/plugin.json. shell form with shell=bash, not exec form: exec form would spawn `bash` from PATH, which a Windows host need not have, whereas shell=bash lets Claude Code select Git Bash itself. Embedded quotes are safe here because bash parses them; only the Codex Windows runtime mis-parses them.",
+  "description": "Claude Code only. Codex reads hooks/hooks.codex.json, declared in .codex-plugin/plugin.json. shell form with shell=bash, not exec form: exec form would spawn `bash` from PATH, which a Windows host need not have, whereas shell=bash lets Claude Code select Git Bash itself. Embedded quotes are safe here because bash parses them; only the Codex Windows runtime mis-parses them.",
   "hooks": {
     "Stop": [
       {
