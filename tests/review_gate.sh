@@ -654,5 +654,31 @@ rm -f "$PPROJ/.private/sdp-config-provenance.json"
 python3 "$HARNESS" --binary-resolver "$RESOLVER" -- --cwd "$PPROJ" --reviewer claude "review" plan.md >/dev/null 2>&1
 [ "$?" -eq 0 ] && ok "missing provenance preserves standalone gate use" || bad "standalone gate wrongly requires provenance"
 
+# The scope rule must reach the REVIEWER, and the preamble is the only text that
+# does on every path (CLI and MCP, every provider). Asserted on the composed
+# prompt from both trees, not on the constant: a rule defined but not
+# interpolated would pass a constant check and reach nobody. The second half is
+# what keeps real inconsistencies -- self-contradiction, contradiction with the
+# described code -- blocking; losing it would turn the rule into "ignore drift".
+for tree in plugins/sdp/scripts scripts; do
+  if python3 - "$tree" <<'PYEOF'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import review_gate as r
+text = r._review_prompt("req", Path("a.md"), "ART")
+rule = r.SCOPE_RULE
+ok = ("Scope rule: " + rule) in text
+ok = ok and "solely to sync other files" in rule and "never a BLOCK" in rule
+ok = ok and "own claims, requirements or evidence still block" in rule
+# Before the untrusted artifact, never inside it.
+ok = ok and text.index(rule) < text.index("BEGIN_UNTRUSTED_ARTIFACT")
+raise SystemExit(0 if ok else 1)
+PYEOF
+  then ok "$tree: reviewer preamble carries the scope rule, defects still block"
+  else bad "$tree: scope rule missing, altered, or not ahead of the artifact"
+  fi
+done
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]
