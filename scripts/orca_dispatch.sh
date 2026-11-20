@@ -315,6 +315,11 @@ _compose_spec() {
   local rules_clause="$1" branch="$2"
   # shellcheck disable=SC2016  # $(pwd) is deliberately literal text for the WORKER's own shell to evaluate, not this script
   printf 'First anchor this session: run  CLAUDE_PROJECT_DIR="$(pwd)" bash "%s/sdp-anchor.sh" . ' "$SDP_SCRIPTS"
+  # Run-continuation (issue #5): Orca creates the worktree after this spec is
+  # composed, so the adapter cannot write the run record itself; the worker
+  # arms its own run as its first action.
+  # shellcheck disable=SC2016  # $(pwd) is the WORKER's, as above
+  printf 'Then arm this run: run  bash "%s/precompact_launcher.sh" run arm --status "$(pwd)/STATUS.md" --dispatch orca . ' "$SDP_SCRIPTS"
   printf 'Then read %s and run the full SDP workflow (Stages 1-8 + the two Claude gates) UNATTENDED; pause and report on INFRA_ERROR. ' "$CORE_FILE"
   printf 'Skip the Stage 1 interview and start at Stage 2; the segment scope is the SEGMENT SCOPE block at the end of this message. '
   [ -n "$branch" ] && printf 'Commit your work on the branch already checked out here (%s). Do not create, switch, push or merge branches. ' "$branch"

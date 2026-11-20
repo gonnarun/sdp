@@ -209,6 +209,7 @@ The summary is a **required-reference index, not a replacement** for the origina
 * **Normalize is the source of truth**: from Stage 3 on, `normalize_{feature}.md` is the single source of user requirements.
 * **No progress-only stops**: do not end a turn with a status report while a permitted next action remains — run that action and report with its result. Ending is correct only when the workflow is complete, a rule requires a pause, an irreversible or outward-facing step needs approval (merge, push, migration), or progress is genuinely blocked.
 * **Before ending a turn, classify**: **don't ask** — policy, the plan, or a frozen Stage 1 decision already fixes the next action; take it (`the default is to continue` is the tell). **Say, don't stop** — a user answer would be better but a conservative default exists; take it, state it in one line, continue. **Stop and ask** — no safe default exists; ask only for that decision. **Stop and report** — a hard halt or an unattended pause forbids further action and poses no answerable question; report the state and stop.
+* **Dispatched runs enforce this in the `Stop` hook** (issue #5): once the dispatcher has armed the run (`run arm`), a turn may end only on a fresh `STATUS.md`, a gate `.halt`, an infra pause, or a pending marker or split request. A refused stop is answered with the next action, not with another report. Interactive sessions are not armed.
 
 ---
 

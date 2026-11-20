@@ -23,6 +23,8 @@ In **this** (main) session, perform only **Stage 1 (Interview)** with the user (
 
 Each handover must include a **shared design skeleton / data-model contract** covering only the shared surfaces — schema, shared modules, trust boundaries (REQ-C-05) — so per-task designs don't collide. Each session designs task-local detail beneath that contract.
 
+Each handover must also open and close the run the same way the adapters do (issue #5). **First instruction:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/precompact_launcher.sh" run arm --status "$(pwd)/STATUS.md" --dispatch manual`, run from the worktree root, with `${CLAUDE_PLUGIN_ROOT}` replaced by the resolved absolute plugin root when you emit the handover (a pasted session has no such variable; same as the core path). This arms the Stop hook to refuse a progress-only turn end in that worktree. **Completion:** write `STATUS.md` at the worktree root as exactly one of `SUCCESS | FAIL_12X | HALT_BLOCK | PAUSE_USER_INPUT_REQUIRED`. A question for the operator is `PAUSE_USER_INPUT_REQUIRED` with the question in the final message. Until that file exists, the session may end a turn only on a gate halt, a gate infra pause (`INFRA_ERROR`), or a pending marker or split request.
+
 ## 3. Dispatch mode (`dispatch_mode: manual | auto | orca`)
 
 - **`manual` (default).** Applies when the anchor-selected `defaults.yaml` sets no `dispatch.worktree_mode` — confirm that against the file the anchor actually selected, which is frequently user-global, before concluding the mode is `manual`. Emit each task's handover as a copy-pasteable block. The user opens a **Codex** session per task (`git worktree add …`), pastes the handover, and that Codex session runs the full SDP core in its worktree.

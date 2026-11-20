@@ -201,6 +201,17 @@ User-global config works across repositories with no setup in each repo. Add `.s
 
 The first three share **one SDP core** — identical Stage 1–8, identical two gates, identical evaluator PASS. Parallelism never weakens the gate. `/precompact` is a utility command and does not run the SDP core.
 
+**Dispatched runs do not stop on a progress report.** No operator starts a dispatched worker's next turn. A turn that ends with "next I will …" therefore stalls the run (issue #5). The shipped `Stop` hook refuses such a stop while two things hold: a **run record** (`.private/sdp-run.json` at the worktree's git root) exists, and no legal end state is visible on disk. The legal end states are:
+
+- the run's `STATUS.md`, written as `SUCCESS | FAIL_12X | HALT_BLOCK | PAUSE_USER_INPUT_REQUIRED`;
+- a gate `.halt`;
+- a gate infra pause: an `INFRA_ERROR` since the arm, seen as `.infra_flag` / `.needs_human` or as the latest audit row for that artifact (pre-root failures write no flag file);
+- a pending marker or split request.
+
+Each one must postdate the arm. The dispatchers arm the run: `run_segment_tmux.sh` itself when it has a dedicated worktree (`SDP_SESSION_CWD`), and the Orca and manual workers as their first instruction (`precompact_launcher.sh run arm --status <abs STATUS.md>`). Nothing else arms it. In particular, `mode: unattended` in `gates.yaml` (the built-in default) and the precompact mode file do not. Interactive sessions are therefore untouched.
+
+Each refusal costs one turn. After `max_idle_blocks` (default 6, range 1–7) consecutive refusals with no tool call between them, the stop is allowed. This is below Claude Code's own cap of 8 (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). Subagents are never held, and the guard stands down while the session's precompact marker is pending and live, because the snapshot turn has to end. `precompact_hook.py run show` prints the record and the current verdict. `run disarm` removes it: a run that ended without `STATUS.md` otherwise leaves the worktree armed. Limits are in `docs/KNOWN_GAPS.md` NC-35.
+
 Command names are written in the Claude Code slash form above. On Codex the same commands are `$sdp:sdp`, `$sdp:batch-sdp`, `$sdp:worktree-dispatch` and `$sdp:precompact`.
 
 A per-command reference with examples is in [`COMMAND_MANUAL.md`](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.md) ([한국어](https://github.com/gonnarun/sdp/blob/master/COMMAND_MANUAL.ko.md)).

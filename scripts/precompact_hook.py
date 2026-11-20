@@ -49,13 +49,16 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import os
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime
 import uuid
 from pathlib import Path
 
@@ -481,11 +484,29 @@ def _read_json(path: Path, max_bytes: int = MAX_JSON_BYTES) -> dict:
         return {}
     if st.st_size > max_bytes:
         return {}
+    # Open without following a symlink and without blocking, then re-check the
+    # OPENED file: a FIFO swapped in after the lstat must not hang the hook
+    # before any deadline is running. Flags absent on a platform are 0.
+    flags = win_compat.open_flags(os.O_RDONLY, getattr(os, "O_NOFOLLOW", 0), getattr(os, "O_NONBLOCK", 0))
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+        fd = os.open(path, flags)
+    except OSError:
         return {}
+    try:
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_bytes:
+            return {}
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            data = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     return data if isinstance(data, dict) else {}
 
 
@@ -1810,7 +1831,7 @@ CYCLE_CONTRACT_REV = 2
 # Files that sit beside a marker but are not one. doctor must not report
 # them as pending snapshot requests, and the prune has to reach them or
 # they accumulate one per session forever.
-SIDECAR_SUFFIXES = (".window.json", ".pane.json", ".selffire.json", ".submit.json")
+SIDECAR_SUFFIXES = (".window.json", ".pane.json", ".selffire.json", ".submit.json", ".run.json")
 
 
 def sticky_window(session_id: str, inferred: int) -> int:
@@ -1930,33 +1951,1017 @@ def read_hook_input() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+# ------------------------------------------------------- run-continuation --
+# Issue #5. In a DISPATCHED run no operator starts the next turn, so a turn that
+# ends with "next I will ..." stalls the run until something outside nudges it.
+# Prose did not hold (measured in the issue); this decision blocks such a stop
+# at the moment it happens, keyed on state visible on disk -- never on the
+# wording of the last message.
+#
+# Armed ONLY by a run record the dispatcher writes into the worker's worktree
+# (`run arm`). Not by gates.yaml `mode: unattended`: that is the gate's override
+# policy and also the built-in default, so keying on it would block every
+# interactive session. Not by ~/.sdp/precompact.json either.
+
+RUN_RECORD_REL = Path(".private") / "sdp-run.json"
+RUN_RECORD_VERSION = 1
+RUN_DISPATCH_KINDS = ("tmux", "orca", "manual")
+# Below Claude Code's CLAUDE_CODE_STOP_HOOK_BLOCK_CAP default (8) so SDP decides
+# before the host overrides; on Codex no host cap is visible, so this is the
+# only bound there. A run may lower it in its record.
+RUN_MAX_IDLE_BLOCKS = 6
+RUN_IDLE_RANGE = (1, 7)
+RUN_ANCESTOR_LIMIT = 64
+RUN_TRANSCRIPT_SCAN_MAX = 4 * 1024 * 1024
+RUN_TRANSCRIPT_BACKTRACK = 1024 * 1024   # re-read before the baseline to the record start
+RUN_STATUS_SET = ("SUCCESS", "FAIL_12X", "HALT_BLOCK", "PAUSE_USER_INPUT_REQUIRED")
+RUN_STATUS_VALUES = " | ".join(RUN_STATUS_SET)
+RUN_STATUS_SCAN_MAX = 16 * 1024 * 1024   # unterminated first line beyond this -> unknown (allow)
+RUN_STATUS_VALUE_MAX = 32               # longer than every RUN_STATUS_SET value
+RUN_STATUS_PATH_MAX = 1024
+RUN_DECISION_MAX_SEC = 8.0
+RUN_WALK_MAX_DIRS = 20000
+RUN_WALK_MAX_SEC = 3.0
+RUN_AUDIT_MAX_BYTES = 16 * 1024 * 1024
+
+RUN_BLOCK_REASON = (
+    "SDP dispatched run: do not end this turn. No operator starts the next turn "
+    "in a dispatched run, so ending now stalls it. Take the next action now. A "
+    "turn may end only when (1) the run's STATUS.md (its path is status_path in "
+    ".private/sdp-run.json at the worktree root) has been written as exactly one of "
+    + RUN_STATUS_VALUES
+    + " (a question for the operator is PAUSE_USER_INPUT_REQUIRED, with the "
+    "question in your final message), (2) a review gate has halted (.halt), "
+    "(3) a marker or split request is waiting for a human to record it, or (4) "
+    "a review gate reported INFRA_ERROR (an infra pause). Knowing "
+    "what to do next is not an end condition. [{n}/{max}]"
+)
+
+
+def _ancestors(start: Path, limit: int = RUN_ANCESTOR_LIMIT):
+    cur = start
+    for _ in range(limit):
+        yield cur
+        if cur.parent == cur:
+            return
+        cur = cur.parent
+
+
+def find_run_root(cwd: str) -> Path | None:
+    """Nearest ancestor of cwd (inclusive) holding `.git` (file or dir)."""
+    if not cwd:
+        return None
+    try:
+        start = Path(cwd).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    for cand in _ancestors(start):
+        try:
+            if os.path.lexists(cand / ".git"):
+                return cand
+        except OSError:
+            return None
+    return None
+
+
+def run_record_path(root: Path) -> Path:
+    return root / RUN_RECORD_REL
+
+
+def _idle_max(record: dict) -> int:
+    value = record.get("max_idle_blocks", RUN_MAX_IDLE_BLOCKS)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return RUN_MAX_IDLE_BLOCKS
+    lo, hi = RUN_IDLE_RANGE
+    return value if lo <= value <= hi else RUN_MAX_IDLE_BLOCKS
+
+
+def read_run_record(root: Path) -> dict:
+    """The run record, or {} when absent or malformed (= not armed)."""
+    record = _read_json(run_record_path(root))
+    version = record.get("version")
+    if isinstance(version, bool) or version != RUN_RECORD_VERSION:   # True == 1 in Python
+        return {}
+    status = record.get("status_path")
+    if not isinstance(status, str) or not os.path.isabs(status):
+        return {}
+    # The record is repo content (a clone can ship one). status_path is never
+    # echoed (the Stop reason is fixed text) but is printed by `run show` and
+    # doctor: no control characters, bounded length, basename STATUS.md.
+    if (len(status) > RUN_STATUS_PATH_MAX or os.path.basename(status) != "STATUS.md"
+            or any(ord(c) < 32 or ord(c) == 127 for c in status)):
+        return {}
+    armed = record.get("armed_at")
+    if isinstance(armed, bool) or not isinstance(armed, (int, float)):
+        return {}
+    # A huge JSON integer overflows float(); json also accepts NaN/Infinity,
+    # and NaN != NaN would reset the idle budget on every Stop (the
+    # arm-mismatch rule), so the bound would never exhaust.
+    try:
+        armed = float(armed)
+    except OverflowError:
+        return {}
+    if not math.isfinite(armed) or armed > time.time() + 60:
+        return {}
+    # A FRESH dict of validated fields only: the record is repo content, so no
+    # unvalidated key or value reaches `run show`, doctor or any later caller.
+    clean = {"version": RUN_RECORD_VERSION, "status_path": status, "armed_at": armed}
+    dispatch = record.get("dispatch")
+    clean["dispatch"] = dispatch if dispatch in RUN_DISPATCH_KINDS else "?"
+    if "max_idle_blocks" in record:
+        clean["max_idle_blocks"] = record["max_idle_blocks"]   # _idle_max validates it
+    offsets = record.get("audit_offsets")
+    if (isinstance(offsets, dict) and all(
+            isinstance(k, str) and os.path.isabs(k) and len(k) <= 4096
+            and not any(ord(c) < 32 or ord(c) == 127 for c in k)
+            and isinstance(v, list) and len(v) == 3
+            and all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in v)
+            for k, v in offsets.items())):
+        clean["audit_offsets"] = offsets
+    # malformed offsets: dropped, so every audit file is read from 0 under the cap
+    return clean
+
+
+def _isdir_strict(path: Path) -> bool:
+    """is_dir() that reports only absence as False; any other OSError
+    propagates (Path.is_dir() swallows it, which would turn an unreadable
+    ancestor into "no gate state" and block instead of failing open)."""
+    try:
+        return stat.S_ISDIR(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _lexists_strict(path: Path) -> bool:
+    """os.path.lexists() with the same rule as _isdir_strict."""
+    try:
+        os.lstat(path)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+class _DiscoveryIncomplete(OSError):
+    """The gate-root search did not see the whole run root (cap hit or a walk
+    error). Raised as an OSError so run_end_state answers "io" -- allow."""
+
+
+def _walk_caps() -> tuple:
+    max_dirs, max_sec = RUN_WALK_MAX_DIRS, RUN_WALK_MAX_SEC
+    if os.environ.get("SDP_PRECOMPACT_SELFTEST") == "1":
+        try:
+            max_dirs = min(max_dirs, int(os.environ.get("SDP_RUN_WALK_MAX_DIRS") or max_dirs))
+        except ValueError:
+            pass
+    return max_dirs, max_sec
+
+
+def _base_for(cand: Path, raw: str):
+    """The audit base review_gate._audit_base would use for root `cand`."""
+    if not raw:
+        return cand / ".private" / "sdp-artifacts"
+    # A leading ~ against the PASSWD home, as review_gate._expand does; never
+    # $HOME (ADR-W02). ~user is not a gate base.
+    if raw == "~" or raw.startswith("~/"):
+        return passwd_home() / raw[2:]
+    if raw.startswith("~"):
+        return None
+    base = Path(raw)
+    return base if base.is_absolute() else cand / base
+
+
+def _gate_bases(cwd_path: Path, root: Path) -> list:
+    """Every audit base a gate run inside this run root can have written to.
+
+    review_gate._resolve_root prefers an explicit --cwd that contains the
+    artifact, with or without `.sdp/`/`.git`, and resolves it to a real path.
+    So the candidates are every ancestor of cwd up to the run root, plus every
+    directory of a COMPLETE walk of the run root (nothing pruned, symlinks not
+    followed: a gate root's real path is visited where it really is). A walk
+    that is cut short by a cap or an error raises _DiscoveryIncomplete: a
+    partial view must never force continuation.
+    """
+    raw = os.environ.get("SDP_BASE_DIR") or ""
+    bases: list = []
+
+    def add(base) -> None:
+        if base is not None and base not in bases:
+            bases.append(base)
+
+    for cand in _ancestors(cwd_path):
+        add(_base_for(cand, raw))
+        if cand == root:
+            break
+    max_dirs, max_sec = _walk_caps()
+    errors: list = []
+    started = time.monotonic()
+    seen = 0
+    for dirpath, _dirs, _files in os.walk(root, onerror=errors.append, followlinks=False):
+        seen += 1
+        if seen > max_dirs or time.monotonic() - started > max_sec:
+            raise _DiscoveryIncomplete("gate-root search hit its cap at %d dirs" % seen)
+        base = _base_for(Path(dirpath), raw)
+        if base is not None and base not in bases and _isdir_strict(base):
+            bases.append(base)
+    if errors:
+        raise _DiscoveryIncomplete("gate-root search incomplete: %s" % errors[0])
+    return bases
+
+
+def _iso_ts(raw) -> float | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError, OSError):   # Windows: out-of-range ts raise
+        return None
+
+
+def _audit_files(bases: list) -> list:
+    """Every gate-audit.ndjson a gate run of this run can append to: each
+    candidate base, plus the pre-root sink in the passwd home."""
+    files, seen = [], set()
+    for path in [b / "gate-audit.ndjson" for b in bases] + [sdp_home() / "gate-audit.ndjson"]:
+        # Only a REGULAR file may claim a realpath key. A symlinked leaf is
+        # skipped BEFORE reserving its target's key, so an alias to the home
+        # sink cannot eclipse the real sink (F27). Absent files are skipped;
+        # any other lstat error propagates (the caller allows the stop).
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        real = os.path.realpath(path)
+        if real not in seen:  # many bases resolving (via symlinked dirs) to one file read it once
+            seen.add(real)
+            files.append(path)
+    return files
+
+
+def _audit_cap() -> int:
+    cap = RUN_AUDIT_MAX_BYTES
+    if os.environ.get("SDP_PRECOMPACT_SELFTEST") == "1":
+        try:
+            cap = min(cap, int(os.environ.get("SDP_RUN_AUDIT_MAX_BYTES") or cap))
+        except ValueError:
+            pass
+    return cap
+
+
+def audit_offsets_now(bases: list) -> dict:
+    """{realpath: [st_dev, st_ino, size]} for every existing audit file -- the
+    byte boundary of "before the arm". The files are append-only (O_APPEND),
+    so every byte past a recorded size was appended after the arm."""
+    offsets = {}
+    for path in _audit_files(bases):
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if stat.S_ISREG(st.st_mode):
+            offsets[os.path.realpath(path)] = [st.st_dev, st.st_ino, st.st_size]
+    return offsets
+
+
+def _audit_infra_pause(bases: list, root: Path, offsets: dict) -> bool:
+    """Whether the latest audited verdict since the arm, for some artifact in
+    this run, is INFRA_ERROR. Every INFRA_ERROR is audited -- post-root to
+    <base>/gate-audit.ndjson, pre-root (no state paths yet, so no flag file) to
+    <passwd home>/.sdp/gate-audit.ndjson. A root-resolution failure is the
+    exception: its row carries a null artifact and is not a pause (NC-35). "Since the arm" is the byte offset
+    recorded at arm time, never a timestamp (writers are not ordered). A later
+    verdict for the same artifact supersedes the error, so a recovered infra
+    blip is not a permanent pass. A replaced, truncated, removed or
+    symlink-swapped file recorded at arm, or a span past the cap, is
+    incomplete coverage: _DiscoveryIncomplete, i.e. allow."""
+    cap = _audit_cap()
+    total = 0
+    latest: dict = {}
+    files = _audit_files(bases)
+    # Every file recorded at arm must still be read now. One that vanished, or
+    # became a symlink (which _audit_files skips), would otherwise drop out of
+    # coverage silently and the stop would be blocked on a partial view.
+    live = {os.path.realpath(p) for p in files}
+    for key in offsets:
+        if key not in live:
+            raise _DiscoveryIncomplete("gate audit file recorded at arm is no longer readable: %s" % key)
+    for path in files:
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            raise _DiscoveryIncomplete("gate audit file vanished during the check: %s" % path)
+        if not stat.S_ISREG(st.st_mode):
+            raise _DiscoveryIncomplete("gate audit file changed type during the check: %s" % path)
+        start = 0
+        recorded = offsets.get(os.path.realpath(path))
+        if recorded:
+            if [st.st_dev, st.st_ino] != recorded[:2]:
+                raise _DiscoveryIncomplete("gate audit file replaced since the arm: %s" % path)
+            if st.st_size < recorded[2]:
+                raise _DiscoveryIncomplete("gate audit file truncated since the arm: %s" % path)
+            start = recorded[2]
+        if total + (st.st_size - start) > cap:
+            # Checked BEFORE the read, and summed across every file.
+            raise _DiscoveryIncomplete("gate audit spans since the arm exceed the cap at %s" % path)
+        total += st.st_size - start
+        # Open without following a link and confirm the OPENED file is the one
+        # just checked: a swap after the lstat is incomplete coverage.
+        fd = os.open(path, win_compat.open_flags(os.O_RDONLY, getattr(os, "O_NOFOLLOW", 0), getattr(os, "O_NONBLOCK", 0)))
+        with os.fdopen(fd, "rb") as fh:
+            fst = os.fstat(fh.fileno())
+            if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+                raise _DiscoveryIncomplete("gate audit file swapped during the check: %s" % path)
+            fh.seek(start)
+            blob = fh.read(st.st_size - start)
+        if len(blob) != st.st_size - start:
+            # Truncated between the size check and the read: rows may be gone.
+            raise _DiscoveryIncomplete("gate audit file shrank during the check: %s" % path)
+        # NDJSON records end at b"\n" only. str.splitlines() would also split
+        # on U+0085/U+2028/U+2029, which ensure_ascii=False writers leave raw.
+        for raw in blob.split(b"\n"):
+            line = raw.decode("utf-8", "replace")
+            try:
+                row = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            ts = _iso_ts(row.get("ts"))
+            artifact = row.get("artifact")
+            if ts is None or not isinstance(artifact, str) or not artifact:
+                continue
+            # One key per artifact however it was spelled (symlink, /var vs
+            # /private/var): the root is a resolved path, and supersession
+            # must group aliases of the same file together.
+            try:
+                try:
+                    # strict: a resolution error is surfaced, not papered over
+                    # with a partially resolved path. Path.resolve(strict=True)
+                    # rather than os.path.realpath(strict=...), which is 3.10+;
+                    # the supported floor is Python 3.9.
+                    key = str(Path(artifact).resolve(strict=True))
+                except FileNotFoundError:
+                    key = os.path.realpath(artifact)   # deleted since: nothing left to follow
+            except (OSError, ValueError, RuntimeError) as exc:   # RuntimeError: symlink loop on 3.9-3.12
+                # Cannot tell whether this row belongs to the run: unknown.
+                raise _DiscoveryIncomplete("audit row artifact unresolvable: %s" % exc)
+            try:
+                Path(key).relative_to(root)
+            except ValueError:
+                continue   # outside the run root: not this run's row
+            prev = latest.get(key)
+            verdict = row.get("verdict")
+            # Equal timestamps (possibly from different sinks, scanned in any order)
+            # resolve toward INFRA_ERROR, i.e. toward allowing, so the verdict never
+            # depends on file scan order.
+            if (prev is None or ts > prev[0]
+                    or (ts == prev[0] and (verdict == "INFRA_ERROR" or prev[1] != "INFRA_ERROR"))):
+                latest[key] = (ts, verdict)
+    return any(verdict == "INFRA_ERROR" for _ts, verdict in latest.values())
+
+
+def _mtime(path: Path) -> float | None:
+    """mtime, or None when the path does not exist. Any other OSError
+    propagates so the caller can fail open instead of reading it as absent."""
+    try:
+        return os.stat(path).st_mtime
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _status_written(path: Path, armed: float) -> bool:
+    """Whether the run's STATUS.md is written: a regular file, newer than the
+    arm, holding exactly one of the four values. Absent -> False; any other
+    OSError propagates (fail open in the caller)."""
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_mtime < armed:
+        return False
+    # Read the file just checked, not whatever the path names a moment later:
+    # no link following, no blocking, and the OPENED file must be the same
+    # regular, fresh file. A swap in between is not a status.
+    fd = os.open(path, win_compat.open_flags(os.O_RDONLY, getattr(os, "O_NOFOLLOW", 0), getattr(os, "O_NONBLOCK", 0)))
+    with os.fdopen(fd, "rb", buffering=0) as fh:   # unbuffered: no read-ahead past the cap
+        fst = os.fstat(fh.fileno())
+        if not stat.S_ISREG(fst.st_mode) or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            # Replaced between the check and the open: unknown, not "no status".
+            raise _DiscoveryIncomplete("STATUS.md replaced during the check")
+        if fst.st_mtime < armed:
+            return False
+        # Same reading as both adapters, "$(head -n1 | tr -d '[:space:]')",
+        # streamed over BYTES with no line-length bound: the first line ends at
+        # the first b"\n" only; ASCII whitespace (the C-locale [:space:] set)
+        # and NUL (dropped by command substitution) are removed; bytes after
+        # the first newline are never read. Only the kept bytes are held, and
+        # once they outgrow the longest value the answer is settled (no).
+        # A first line still unterminated after RUN_STATUS_SCAN_MAX bytes is
+        # unknown: fail open, as every other cap does.
+        kept = bytearray()
+        scanned = 0
+        while True:
+            if scanned >= RUN_STATUS_SCAN_MAX:
+                # Checked BEFORE reading on: no byte past the cap is consulted.
+                raise _DiscoveryIncomplete("STATUS.md first line exceeds the scan cap")
+            chunk = fh.read(min(65536, RUN_STATUS_SCAN_MAX - scanned))
+            if not chunk:
+                if scanned < fst.st_size:
+                    # EOF before the size fstat reported: shrunk in place
+                    # during the check -> unknown, not "no status".
+                    raise _DiscoveryIncomplete("STATUS.md shrank during the check")
+                break
+            line_end = chunk.find(b"\n")
+            part = chunk if line_end < 0 else chunk[:line_end]
+            kept.extend(b for b in part if b not in b" \t\n\r\x0b\x0c\x00")
+            if len(kept) > RUN_STATUS_VALUE_MAX:
+                return False
+            if line_end >= 0:
+                break
+            scanned += len(chunk)
+    return bytes(kept).decode("ascii", "replace") in RUN_STATUS_SET
+
+
+def run_end_state(cwd_path: Path, root: Path, record: dict) -> str:
+    """A tag naming the legal end state that allows this stop, or "".
+
+    Every end state must postdate `armed_at`, so artifacts an earlier dispatch
+    left in the same worktree never authorize a stop after a re-arm. Any
+    unexpected I/O error answers "io" -- allow, never block on a guess.
+    """
+    armed = float(record["armed_at"])
+    try:
+        if _status_written(Path(record["status_path"]), armed):
+            return "status"
+        bases = _gate_bases(cwd_path, root)
+        for base in bases:
+            gate = base / "gate"
+            if not _isdir_strict(gate):
+                continue
+            with os.scandir(gate) as it:
+                entries = [e for e in it if e.name.startswith("review_gate_")]
+            for entry in entries:
+                name = entry.name
+                # Gate state is written as regular files; anything else (a
+                # directory, a symlink) named like one is not an end state.
+                est = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(est.st_mode):
+                    continue
+                if name.endswith(".halt"):
+                    m = est.st_mtime
+                    if m >= armed:
+                        return "halt"
+                # An unattended INFRA_ERROR orders "pause + notify"; the gate
+                # records it as .infra_flag / .needs_human.
+                if name.endswith((".infra_flag", ".needs_human")):
+                    if est.st_mtime >= armed:
+                        return "infra"
+                for suffix in (".marker-request", ".split-request"):
+                    if not name.endswith(suffix):
+                        continue
+                    m = est.st_mtime
+                    if m < armed:
+                        continue
+                    log_m = _mtime(gate / (name[: -len(suffix)] + ".log"))
+                    if log_m is None or m >= log_m:
+                        return "request"
+        if _audit_infra_pause(bases, root, record.get("audit_offsets") or {}):
+            return "infra"
+    except OSError as exc:
+        if isinstance(exc, _DiscoveryIncomplete):
+            sys.stderr.write("sdp run-continuation: %s; allowing this stop\n" % exc)
+        return "io"
+    return ""
+
+
+def run_state_path(session_id: str) -> Path:
+    return state_dir() / (_safe_session(session_id) + ".run.json")
+
+
+def read_run_state(session_id: str) -> dict:
+    try:
+        return _read_json(run_state_path(session_id))
+    except OSError:
+        return {}
+
+
+def write_run_state(session_id: str, payload: dict) -> bool:
+    try:
+        return _write_json(run_state_path(session_id), payload)
+    except OSError:
+        return False
+
+
+def read_run_state_strict(session_id: str) -> dict | None:
+    """The run state: {} when absent, None when it exists but cannot be read
+    or is not a JSON object. None must never be mistaken for a fresh budget."""
+    try:
+        path = run_state_path(session_id)
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_JSON_BYTES:
+        return None
+    # Same open as _read_json: no link following, no blocking, and the OPENED
+    # file re-checked, so a FIFO swapped in after the lstat cannot hang Stop.
+    try:
+        fd = os.open(path, win_compat.open_flags(os.O_RDONLY, getattr(os, "O_NOFOLLOW", 0), getattr(os, "O_NONBLOCK", 0)))
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fd)
+        if (not stat.S_ISREG(fst.st_mode) or fst.st_size > MAX_JSON_BYTES
+                or (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino)):
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            data = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if not isinstance(data, dict) or not data:
+        # Every state this hook writes has keys; an existing EMPTY object is
+        # malformed, not "absent" -- treating it as a first arm would refill
+        # the budget.
+        return None
+    return data
+
+
+def note_blocker(session_id: str, who: str) -> None:
+    """Record which decision issued the last block for this session. An
+    unreadable state is left alone -- rewriting it would hand out a budget."""
+    state = read_run_state_strict(session_id)
+    if state is None:
+        return
+    state["last_blocker"] = who
+    write_run_state(session_id, state)
+
+
+def _is_tool_call(record: dict) -> bool:
+    if record.get("type") == "assistant":
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            return any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
+        return False
+    if record.get("type") == "response_item":
+        payload = record.get("payload")
+        kind = payload.get("type") if isinstance(payload, dict) else None
+        return isinstance(kind, str) and kind.endswith("_call")
+    return False
+
+
+def _open_transcript(path: str) -> tuple:
+    """(fd, (dev, ino, size)) for a readable regular transcript, or (None, None)
+    when there is none (no path, or absent). The identity is
+    the fstat of the descriptor _work_since then reads, so no swap can fall
+    between them. Any other error (EACCES, a non-regular file, ...) propagates: the caller allows
+    the stop without writing, so an error never spends or refills the budget."""
+    if not path:
+        return None, None
+    try:
+        fd = os.open(path, win_compat.open_flags(os.O_RDONLY, getattr(os, "O_NONBLOCK", 0)))
+    except (FileNotFoundError, NotADirectoryError):
+        return None, None
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    if not stat.S_ISREG(st.st_mode):
+        # It exists but is not a transcript we can read (a directory, a FIFO):
+        # an error, not "no transcript", so no count is spent on it.
+        os.close(fd)
+        raise OSError("transcript is not a regular file")
+    return fd, (st.st_dev, st.st_ino, st.st_size)
+
+
+def _work_since(fd: int | None, state: dict, ident: tuple | None) -> bool | None:
+    """Whether the model made a tool call since the last recorded block.
+
+    Only the bytes appended since then are scanned. A replaced file (new
+    identity, whatever its size), a shrunk one, or more than the scan cap
+    appended all count as work. No transcript at all is NOT work, so the bound
+    still holds.
+    """
+    if ident is None:
+        return False
+    dev, ino, size = ident
+    old_id = state.get("transcript_id")
+    old_size = state.get("transcript_size")
+    if old_id is None and old_size is None:
+        # No baseline is no evidence of work (like "no transcript is not
+        # work"); the next block records one. Counting it as work would hand
+        # a fresh budget to a state that merely lost its baseline.
+        return False
+    if not isinstance(old_id, list) or not isinstance(old_size, int):
+        return True
+    if old_id != [dev, ino] or size < old_size:
+        return True
+    if size - old_size > RUN_TRANSCRIPT_SCAN_MAX:
+        return True
+    if size == old_size:
+        return False
+    # Read from the SAME descriptor whose fstat produced `ident`, so the bytes
+    # scanned belong to the identified file. A short read (truncated meanwhile)
+    # or a read error is unknown, not work.
+    # The baseline may fall INSIDE a JSONL record (the host was mid-write when
+    # the block was recorded). Re-read back to the last b"\n" before it, within
+    # RUN_TRANSCRIPT_BACKTRACK, so a tool-call record completed after the
+    # block is parsed whole rather than as an unparseable suffix.
+    back = min(old_size, RUN_TRANSCRIPT_BACKTRACK)
+    start = old_size - back
+    want = size - start
+    chunks, got = [], 0
+    try:
+        os.lseek(fd, start, os.SEEK_SET)
+        while got < want:
+            chunk = os.read(fd, want - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    except OSError:
+        return None
+    if got != want:
+        return None
+    blob = b"".join(chunks)
+    if back:
+        cut = blob.rfind(b"\n", 0, back)
+        if cut < 0 and start > 0:
+            # The record began before the backtrack window: its head is unread,
+            # so whether it is a tool call is unknown -> allow, no write.
+            return None
+        blob = blob[cut + 1:]   # cut == -1 with start == 0: the record began at byte 0
+    # Only newline-TERMINATED records count. An unterminated tail is still being
+    # written; it is scanned once its b"\n" arrives (via the backtrack above),
+    # never twice, so one tool call cannot reset the budget twice.
+    end = blob.rfind(b"\n")
+    blob = blob[:end + 1] if end >= 0 else b""
+    for raw in blob.split(b"\n"):  # JSONL: b"\n" only (see _audit_infra_pause)
+        try:
+            # STRICT decode: a line with invalid UTF-8 is malformed, not a tool
+            # call (replacement characters could make it parse as one).
+            record = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):   # UnicodeDecodeError is a ValueError
+            continue
+        if isinstance(record, dict) and _is_tool_call(record):
+            return True
+    return False
+
+
+def _decision_deadline() -> float:
+    sec = RUN_DECISION_MAX_SEC
+    if os.environ.get("SDP_PRECOMPACT_SELFTEST") == "1":
+        try:
+            sec = min(sec, float(os.environ.get("SDP_RUN_DECISION_MAX_SEC") or sec))
+        except ValueError:
+            pass
+    return sec
+
+
+def _end_state_with_deadline(cwd_path: Path, root: Path, record: dict) -> str:
+    """run_end_state under an ENFORCED deadline. A time check between syscalls
+    cannot bound one that blocks, so the evaluation runs in a daemon thread;
+    if it is still running at the deadline the stop is allowed and the process
+    ends at once (os._exit), so nothing it is stuck in can hold the hook."""
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            box["end"] = run_end_state(cwd_path, root, record)
+        except BaseException:  # noqa: BLE001 - any failure is "unknown": allow
+            box["end"] = "io"
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(_decision_deadline())
+    if worker.is_alive():
+        sys.stderr.write("sdp run-continuation: end-state check exceeded its deadline; allowing this stop\n")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        os._exit(0)
+    return box.get("end", "io")
+
+
+def _finite_number(x) -> bool:
+    """A non-bool int or float that is finite. A huge int (401 digits) raises
+    OverflowError in float(); that is "not finite", not a crash."""
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
+def _is_int(x) -> bool:
+    # bool subclasses int; True must not pass as 1.
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _same_arm_state_ok(state: dict) -> bool:
+    """Budget fields of a state that claims the current arm (F28):
+    idle_blocks a non-bool int >= 0 (required); transcript_id absent or a list
+    of exactly two non-bool ints >= 0 (st_dev, st_ino); transcript_size absent
+    or a non-bool int >= 0; the two baseline keys present together or not at all."""
+    idle = state.get("idle_blocks")
+    if not (_is_int(idle) and idle >= 0):
+        return False
+    if ("transcript_id" in state) != ("transcript_size" in state):
+        return False   # the baseline is both keys or neither
+    if "transcript_id" in state:
+        tid = state["transcript_id"]
+        if not (isinstance(tid, list) and len(tid) == 2 and all(_is_int(v) and v >= 0 for v in tid)):
+            return False
+    if "transcript_size" in state:
+        size = state["transcript_size"]
+        if not (_is_int(size) and size >= 0):
+            return False
+    return True
+
+
+def _run_continuation_reason(payload: dict) -> str:
+    """Run-continuation's block reason for this Stop, or "".
+
+    Never consults stop_hook_active (Claude Code keeps it set for the whole
+    user turn after the first block) nor the precompact mode file.
+    """
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return ""
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd or "\x00" in cwd:
+        return ""
+    root = find_run_root(cwd)
+    if root is None:
+        return ""
+    record = read_run_record(root)
+    if not record:
+        return ""
+    try:
+        cwd_path = Path(cwd).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return ""
+    end = _end_state_with_deadline(cwd_path, root, record)
+    if end:
+        return ""
+    # Precompact's snapshot turn must END: /compact is typed only once the TUI
+    # is idle. Stand down while this session's marker is pending AND live
+    # (bounded by PENDING_EXPIRY_SEC). Not marker_active(): it has no expiry.
+    # snapshotted/injected do not stand down -- compaction is already under way.
+    pc_marker = read_marker(session_id)
+    if not pc_marker:
+        # _read_json answers {} on ANY failure: a marker that exists but cannot
+        # be read is "cannot tell", so stand down rather than block and write.
+        try:
+            os.lstat(marker_path(session_id))
+            present = True
+        except (FileNotFoundError, NotADirectoryError):
+            present = False
+        except OSError:
+            present = True
+        if present:
+            sys.stderr.write("sdp run-continuation: precompact marker unreadable; allowing this stop\n")
+            return ""
+    if pc_marker.get("state") == "pending" and marker_is_live(pc_marker, time.time()):
+        return ""
+    limit = _idle_max(record)
+    state = read_run_state_strict(session_id)
+    if state is None:
+        # Unreadable or malformed state: allow, and do not replace it -- a
+        # replacement would be a fresh budget nobody earned.
+        sys.stderr.write("sdp run-continuation: run state unreadable; allowing this stop\n")
+        return ""
+    # State counts against ONE arm. A re-arm (tmux resume, a reused worktree)
+    # starts a new run: drop the idle count and the transcript baseline, so an
+    # exhausted budget from the previous arm cannot let this one stop at once.
+    budget_keys = ("armed_at", "idle_blocks", "transcript_id", "transcript_size")
+    prev_arm = state.get("armed_at")
+    if any(k in state for k in budget_keys) and not _finite_number(prev_arm):
+        # Budget fields with a missing or malformed armed_at cannot be told
+        # apart from the current arm: treating them as a re-arm would refill
+        # an exhausted budget. Allow, and do not rewrite.
+        sys.stderr.write("sdp run-continuation: run state malformed; allowing this stop\n")
+        return ""
+    if prev_arm != record["armed_at"]:
+        state = {k: v for k, v in state.items() if k == "last_blocker"}
+    elif not _same_arm_state_ok(state):
+        # Same arm but malformed budget fields: normalizing them would hand out
+        # a fresh budget without work (F28). Allow, and do not rewrite.
+        sys.stderr.write("sdp run-continuation: run state malformed; allowing this stop\n")
+        return ""
+    transcript = payload.get("transcript_path")
+    if transcript is None:
+        transcript = ""
+    elif not isinstance(transcript, str):
+        # Malformed evidence, not "no transcript": no count is spent on it.
+        sys.stderr.write("sdp run-continuation: transcript_path malformed; allowing this stop\n")
+        return ""
+    try:
+        # A transcript that exists must open for reading before it may spend
+        # or reset the budget (unchanged-but-unreadable would spend a count; an
+        # unreadable replacement would reset it).
+        tfd, ident = _open_transcript(transcript)
+    except (OSError, ValueError):   # ValueError: an embedded NUL in the path
+        sys.stderr.write("sdp run-continuation: transcript unreadable; allowing this stop\n")
+        return ""
+    try:
+        work = _work_since(tfd, state, ident)
+    finally:
+        if tfd is not None:
+            try:
+                os.close(tfd)
+            except OSError:
+                pass
+    idle = state.get("idle_blocks")
+    idle = idle if isinstance(idle, int) and not isinstance(idle, bool) and idle >= 0 else 0
+    if work is None:
+        sys.stderr.write("sdp run-continuation: transcript unreadable; allowing this stop\n")
+        return ""
+    if work:
+        idle = 0
+    if idle >= limit:
+        sys.stderr.write(
+            "sdp run-continuation: %d consecutive blocks without tool work; "
+            "allowing this stop\n" % idle
+        )
+        return ""
+    idle += 1
+    new_state = dict(state)
+    new_state.update({"idle_blocks": idle, "last_blocker": "run", "armed_at": record["armed_at"]})
+    if ident is not None:
+        new_state["transcript_id"] = [ident[0], ident[1]]
+        new_state["transcript_size"] = ident[2]
+    if not write_run_state(session_id, new_state):
+        # Without persisted state nothing bounds the next block. Stay silent.
+        return ""
+    # Fixed text plus integers only: the record is repo content, so none of it
+    # is echoed to the model.
+    return RUN_BLOCK_REASON.format(n=idle, max=limit)
+
+
+def cmd_run(argv: list) -> int:
+    """`run arm --status <abs path> [--cwd DIR] [--dispatch KIND] [--max-idle-blocks N]`
+    writes the run record at the git root above DIR; `run show [--cwd DIR]`
+    prints it with the current end-state verdict."""
+    sub = argv[0] if argv else ""
+    opts: dict = {}
+    rest = list(argv[1:])
+    while rest:
+        key = rest.pop(0)
+        if key not in ("--status", "--cwd", "--dispatch", "--max-idle-blocks") or not rest:
+            sys.stderr.write("run: bad argument %r\n" % key)
+            return 2
+        opts[key] = rest.pop(0)
+    cwd = opts.get("--cwd") or os.getcwd()
+    root = find_run_root(cwd)
+    if root is None:
+        sys.stderr.write("run: no git root above %s\n" % cwd)
+        return 2
+    if sub == "show":
+        record = read_run_record(root)
+        if not record:
+            sys.stdout.write("run record: none (not armed) at %s\n" % run_record_path(root))
+            return 0
+        end = run_end_state(Path(cwd).resolve(), root, record)
+        sys.stdout.write(
+            "run record: %s\n%s\nend state: %s\n"
+            % (run_record_path(root), json.dumps(record), end or "none (stops are blocked)")
+        )
+        return 0
+    if sub == "disarm":
+        # Operator action: a run that ended without STATUS.md (bound exhausted,
+        # timeout, crash) otherwise leaves the worktree armed for good.
+        try:
+            os.unlink(run_record_path(root))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            sys.stderr.write("run disarm: %s\n" % exc)
+            return 1
+        sys.stdout.write("disarmed: %s\n" % run_record_path(root))
+        return 0
+    if sub != "arm":
+        sys.stderr.write("usage: precompact_hook.py run {arm --status PATH | show | disarm} [--cwd DIR]\n")
+        return 2
+    private = root / RUN_RECORD_REL.parent
+    try:
+        pst = os.lstat(private)
+        if not stat.S_ISDIR(pst.st_mode):
+            sys.stderr.write("run arm: %s is not a real directory (symlink?)\n" % private)
+            return 2
+    except FileNotFoundError:
+        pass
+    status = opts.get("--status") or ""
+    if not os.path.isabs(status):
+        sys.stderr.write("run arm: --status must be an absolute path\n")
+        return 2
+    if (len(status) > RUN_STATUS_PATH_MAX or os.path.basename(status) != "STATUS.md"
+            or any(ord(c) < 32 or ord(c) == 127 for c in status)):
+        sys.stderr.write("run arm: --status must name a STATUS.md (no control chars, <= %d chars)\n"
+                         % RUN_STATUS_PATH_MAX)
+        return 2
+    dispatch = opts.get("--dispatch") or "manual"
+    if dispatch not in RUN_DISPATCH_KINDS:
+        sys.stderr.write("run arm: --dispatch must be one of %s\n" % ", ".join(RUN_DISPATCH_KINDS))
+        return 2
+    # Offsets are captured BEFORE armed_at is taken: a row appended in between
+    # then lies past the recorded offset and counts as post-arm (toward
+    # allowing). The reverse order could fold a post-armed_at INFRA_ERROR into
+    # the "before" span and hide it.
+    offsets = None
+    try:
+        offsets = audit_offsets_now(_gate_bases(root, root))
+    except OSError as exc:
+        # Without offsets every audit file is read from 0 under the cap; that
+        # is still bounded and fail-open, just less precise.
+        sys.stderr.write("run arm: audit offsets not recorded (%s)\n" % exc)
+    record = {
+        "version": RUN_RECORD_VERSION,
+        "status_path": status,
+        "armed_at": time.time(),
+        "dispatch": dispatch,
+    }
+    if offsets is not None:
+        record["audit_offsets"] = offsets
+    if "--max-idle-blocks" in opts:
+        try:
+            record["max_idle_blocks"] = int(opts["--max-idle-blocks"])
+        except ValueError:
+            sys.stderr.write("run arm: --max-idle-blocks must be an integer\n")
+            return 2
+        lo, hi = RUN_IDLE_RANGE
+        if not lo <= record["max_idle_blocks"] <= hi:
+            sys.stderr.write("run arm: --max-idle-blocks must be %d-%d\n" % (lo, hi))
+            return 2
+    path = run_record_path(root)
+    if not _write_json(path, record):
+        sys.stderr.write("run arm: could not write %s\n" % path)
+        return 1
+    if not read_run_record(root):
+        sys.stderr.write("run arm: the written record does not read back as armed: %s\n" % path)
+        return 2
+    sys.stdout.write("%s\n" % path)
+    return 0
+
+
 def hook_stop() -> int:
-    """Stop hook: detect the threshold, block once, and demand the snapshot."""
+    """Stop hook: one entry point, two decisions.
+
+    Precompact (context threshold) is evaluated first, because losing a snapshot
+    to a continuation nudge is the worse outcome. Run-continuation (issue #5)
+    is evaluated only when precompact does not block. At most one block is
+    emitted per Stop.
+    """
     payload = read_hook_input()
-    # The host sets this on the Stop that follows a block. Honouring it is what
-    # bounds the loop -- without it the same block repeats to the host's cap.
     session_id_for_bind = payload.get("session_id")
     if isinstance(session_id_for_bind, str):
         # Every turn, cheaply: the tool that later queues a compaction cannot
         # read the pane key from its own environment on every host.
         bind_pane(session_id_for_bind)
-    if payload.get("stop_hook_active"):
-        return 0
     # A subagent finishing raises SubagentStop, not Stop, but an agent_id here
-    # would still mean this is not the main thread. Never block a subagent.
+    # would still mean this is not the main thread. Never block a subagent --
+    # under either decision.
     if payload.get("agent_id"):
         return 0
-    if not is_auto_enabled():
-        return 0
+    reason = _precompact_reason(payload)
+    if not reason:
+        reason = _run_continuation_reason(payload)
+    if reason:
+        json.dump({"decision": "block", "reason": reason}, sys.stdout)
+    return 0
 
+
+def _precompact_reason(payload: dict) -> str:
+    """Precompact's block reason for this Stop, or "" (detect the threshold,
+    block once, demand the snapshot)."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
-        return 0
+        return ""
+    # The host sets stop_hook_active on the Stop that follows a block, and on
+    # Claude Code it then STAYS set for the rest of the user turn. Honouring it
+    # is what bounds precompact's own loop. When the block that set it was
+    # run-continuation's, honouring it would switch precompact off for the rest
+    # of a dispatched run, whose user turn never ends -- so it is honoured only
+    # for a block precompact itself issued (or one it cannot attribute).
+    if payload.get("stop_hook_active") and read_run_state(session_id).get("last_blocker") != "run":
+        return ""
+    if not is_auto_enabled():
+        return ""
 
     now = time.time()
     marker = read_marker(session_id)
     if marker and marker_is_live(marker, now):
-        return 0
+        return ""
 
     threshold = resolve_threshold()
     pct, used, limit, model, exact = measure_context(
@@ -1973,7 +2978,7 @@ def hook_stop() -> int:
     if pct < threshold:
         if marker:
             clear_marker(session_id)
-        return 0
+        return ""
 
     cwd = payload.get("cwd") or ""
     tag = session_tag(session_id)
@@ -2017,7 +3022,7 @@ def hook_stop() -> int:
     if not persisted:
         # Without a marker nothing suppresses the next detection, so blocking
         # here would block again, and again. Stay silent instead.
-        return 0
+        return ""
     if day_dir == DAY_DIR_UNSAFE:
         reason = UNSAFE_DIR_REASON.format(pct=pct, threshold=threshold, cwd=cwd or ".")
     else:
@@ -2030,8 +3035,8 @@ def hook_stop() -> int:
             dir_note=(DIR_READY_NOTE if ready else DIR_MISSING_NOTE),
             mkdir_note=(MKDIR_BANNED_NOTE if ready else MKDIR_ALLOWED_NOTE),
         )
-    json.dump({"decision": "block", "reason": reason}, sys.stdout)
-    return 0
+    note_blocker(session_id, "precompact")
+    return reason
 
 
 def _log_cycle(session_id, payload, marker, now, bound, path):
@@ -2684,6 +3689,15 @@ def cmd_doctor() -> int:
         except OSError:
             markers = []
     out("live markers      : %s\n" % (", ".join(markers) or "none"))
+    # Run-continuation (issue #5) is armed per worktree, not by this config, so
+    # report it for the directory doctor runs in. Informational, never a FAIL.
+    run_root = find_run_root(os.getcwd())
+    run_record = read_run_record(run_root) if run_root is not None else {}
+    if run_record:
+        out("run record        : %s (dispatch=%s, max idle blocks=%d)\n"
+            % (run_record_path(run_root), run_record.get("dispatch", "?"), _idle_max(run_record)))
+    else:
+        out("run record        : none here -- run-continuation is not armed for this cwd\n")
 
     if problems == 0:
         out("OK    configuration is armed. Confirm the host registered the hooks:\n")
@@ -2818,9 +3832,11 @@ def main(argv: list[str]) -> int:
         return cmd_inject(argv[1:])
     if command == "compact":
         return cmd_compact(argv[1:])
+    if command == "run":
+        return cmd_run(argv[1:])
     sys.stderr.write(
         "usage: precompact_hook.py "
-        "{stop | precompact | start | resume | inject | compact | doctor | config}\n"
+        "{stop | precompact | start | resume | inject | compact | doctor | config | run}\n"
     )
     return 2
 

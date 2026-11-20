@@ -191,6 +191,28 @@ if [ "$TOKEN_BUDGET" -gt 0 ]; then
   esac
 fi
 
+# ---- run-continuation arm (issue #5) ----
+# The Stop hook blocks a progress-only turn end only where a run record exists.
+# Armed only for a dedicated worktree (SDP_SESSION_CWD): the fallback cwd is the
+# segment dir, whose git root is the main checkout, and arming that would hold
+# the operator's own sessions there too. Resume re-arms, which resets armed_at,
+# so the PAUSE status written before it no longer counts as the run's end.
+RUN_ARM=""
+if [ -n "${SDP_SESSION_CWD:-}" ] && [ -n "$STATUS_TARGET" ]; then
+  case "$MODE" in
+    init|continue|resume) RUN_ARM=1 ;;
+  esac
+fi
+case "$STATUS_TARGET" in
+  /*) RUN_STATUS="$STATUS_TARGET" ;;
+  *) RUN_STATUS="$PWD/$STATUS_TARGET" ;;  # the record requires an absolute path
+esac
+run_arm() {
+  bash "$SDP_SCRIPTS/precompact_launcher.sh" run arm --cwd "$SESSION_CWD" \
+    --status "$RUN_STATUS" --dispatch tmux >/dev/null \
+    || echo "WARN: run-continuation arm failed; the worker's progress-only stops will not be blocked" >&2
+}
+
 # ---- dry-run: report the resolved plan, do not spawn/poll ----
 if [ -n "$DRYRUN" ]; then
   echo "DRYRUN ok"
@@ -205,6 +227,11 @@ if [ -n "$DRYRUN" ]; then
   echo "  timeout       : $TIMEOUT_SECONDS"
   echo "  status_target : ${STATUS_TARGET:-<none>}"
   echo "  need_wait     : $NEED_WAIT"
+  if [ -n "$RUN_ARM" ]; then
+    echo "  run_arm       : $SDP_SCRIPTS/precompact_launcher.sh run arm --cwd $SESSION_CWD --status $RUN_STATUS --dispatch tmux"
+  else
+    echo "  run_arm       : <skipped>"
+  fi
   exit 0
 fi
 
@@ -224,6 +251,9 @@ if [ "$MODE" = "init" ]; then
 else
   session_alive "$SESSION_NAME" || { echo "ERROR: session $SESSION_NAME is dead" >&2; exit 7; }
 fi
+# Armed only once the session is confirmed alive (a failed spawn must not
+# leave the worktree armed), and before the prompt is sent.
+if [ -n "$RUN_ARM" ]; then run_arm; fi
 
 # N13 (REQ-044): preserve any prior STATUS.md as evidence (mv, never rm) so a stale
 # file cannot be mistaken for this run's completion and a later 124 keeps the trail.
