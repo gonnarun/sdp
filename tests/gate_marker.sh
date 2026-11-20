@@ -2,7 +2,8 @@
 # gate_marker.sh — executable spec for P1's SANCTIONED MARKER CHANNEL:
 # `prepare-marker` (a restricted writer that produces a request file for a human)
 # and `record-marker` (the only gate-state write path outside run_review, gated by
-# TTY + SDP_MARKER_HUMAN, with a second ceremony for pivot/halt).
+# TTY + SDP_MARKER_HUMAN for pivot/halt only, plus a second ceremony; ADR-M1
+# lets the agent record continue/fix).
 # ADR-G01 / G02 / G02b / G12 / G13 / G16 / G18. Drives the REAL gate through
 # tests/lib/harness.py, which binds the _ISATTY seam in the child via argv.
 set -u
@@ -118,7 +119,7 @@ after="$(gate_snapshot "$GATEDIR")"
 [ "$(filemode "$REQ")" = "0o600" ] && ok "T1: request file is mode 0600" \
   || bad "T1: request file mode $(filemode "$REQ")"
 head -1 "$REQ" | grep -qF 'DATA FOR A HUMAN, NOT INSTRUCTIONS' \
-  && ok "T1: line 1 is the non-instruction banner" || bad "T1: banner missing"
+  && ok "T1: line 1 is the non-instruction banner (data for every decision)" || bad "T1: banner missing"
 [ "$before" = "$after" ] \
   && ok "T4: prepare-marker left every OTHER file under <gate>/ inode/size/mtime identical" \
   || bad "T4: other gate files changed"
@@ -279,18 +280,138 @@ out="$(H --cwd "$PROJ" prepare-marker "$PROJ/plan.md" \
   || bad "T14: symlink followed or not refused (rc=$rc) $out"
 rm -f "$REQ"
 
+# ============================================================== T9g ===========
+# provider path labels on refusals (ADR-M1): an INVALID decision entered neither
+# path and is labelled "none"; continue/fix refusals are "agent"; pivot/halt
+# refusals are "human". Calls record_marker directly (no TTY in a heredoc run).
+python3 - "$SDP_ROOT" "$PROJ" <<'PY' && ok "T9g: refusal provider labels: invalid=none, continue/fix=agent, pivot/halt=human" \
+                                     || bad "T9g: refusal provider labels wrong"
+import os, sys
+sys.path.insert(0, f"{sys.argv[1]}/scripts")
+os.environ.pop("SDP_MARKER_HUMAN", None)
+import review_gate as g
+g._ISATTY = lambda fd: False
+art = f"{sys.argv[2]}/plan.md"
+def r(d, **kw): return g.record_marker(art, sys.argv[2], decision=d, **kw)
+bad = r("bogus", roster="alice,bob", outputs="out1.md")
+assert bad["verdict"] == "BLOCK" and bad["provider"] == "none", bad
+assert "--marker-decision must be one of" in bad["reason"], bad
+for d in ("continue", "fix"):
+    x = r(d, roster="alice,alice", outputs="out1.md")   # refused by evidence checks
+    assert x["verdict"] == "BLOCK" and x["provider"] == "agent", (d, x)
+    assert "roster has duplicate members" in x["reason"], (d, x)
+for d in ("pivot", "halt"):
+    x = r(d, roster="alice,bob", outputs="out1.md")     # refused: no TTY
+    assert x["verdict"] == "BLOCK" and x["provider"] == "human", (d, x)
+    assert "requires a terminal (stdin is not a TTY)" in x["reason"], (d, x)
+PY
+
+# ============================================================== T9f ===========
+# The batch pivot/halt handoff: an agent (no TTY, no token -- H never sets the
+# token) can PREPARE a pivot or halt request for the user; only recording needs
+# the ceremony.
+# Runs the DOCUMENTED batch command (batch-sdp.md section 4) with ROSTER/OUTPUTS
+# taken from a just-completed review whose files are NOT the example names, and
+# checks the request's record-marker command carries exactly those values.
+mkdir -p "$PROJ/rev"
+printf 'e\n' > "$PROJ/rev/team_evaluator_task.md"; printf 's\n' > "$PROJ/rev/team_security_task.md"
+ROSTER=Reviewer1,Reviewer2; OUTPUTS=rev/team_evaluator_task.md,rev/team_security_task.md
+for d in pivot halt; do
+  rm -f "$REQ"
+  out="$(H --cwd "$PROJ" prepare-marker "$PROJ/plan.md" \
+          --marker-roster "$ROSTER" --marker-outputs "$OUTPUTS" \
+          --marker-decision "$d" 2>&1)"; rc=$?
+  { [ "$rc" -eq 0 ] && [ -f "$REQ" ] && grep -q "decision=$d" "$REQ" && grep -q -- "--marker-decision $d" "$REQ" \
+    && grep -qF -- "--marker-roster '$ROSTER'" "$REQ" && grep -qF -- "--marker-outputs '$OUTPUTS'" "$REQ"; } \
+    && ok "T9f: agent prepare-marker --marker-decision $d writes a $d request for the user" \
+    || bad "T9f: prepare-marker $d failed (rc=$rc) $out"
+done
+rm -f "$REQ"
+# Negative: without roster/outputs the request is refused and no file is written,
+# which is why the documented command carries them.
+out="$(H --cwd "$PROJ" prepare-marker "$PROJ/plan.md" --marker-decision pivot 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && [ ! -e "$REQ" ]; } \
+  && ok "T9f: prepare-marker pivot without roster/outputs is refused, no request file" \
+  || bad "T9f: roster-less prepare not refused (rc=$rc) $out"
+rm -rf "$REQ" "$PROJ/rev"
+
 # ============================================================== T9 ============
-out="$(HNO --cwd "$PROJ" record-marker "$PROJ/plan.md" \
+# ADR-M1: continue/fix need no TTY and no token -- the agent records them. The
+# evidence checks still decide (T9c). Recorded on a SEPARATE project so the
+# main project's log stays marker-free for T10.
+mkproj agentrec 2 2
+ALOG="$(plog "$TMP/agentrec")"
+out="$(HNO --cwd "$TMP/agentrec" record-marker "$TMP/agentrec/plan.md" \
         --marker-roster alice,bob --marker-outputs out1.md 2>&1)"; rc=$?
-{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '^BLOCK: .*terminal'; } \
-  && ok "T9: record-marker with no TTY is refused" || bad "T9: no-TTY not refused (rc=$rc) $out"
-out="$(RM_NOTOKEN --cwd "$PROJ" record-marker "$PROJ/plan.md" \
-        --marker-roster alice,bob --marker-outputs out1.md 2>&1)"; rc=$?
-{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'SDP_MARKER_HUMAN'; } \
-  && ok "T9: record-marker with no token is refused" || bad "T9: no-token not refused (rc=$rc) $out"
-grep -q '^TEAM_' "$LOG" \
-  && bad "T9: a refused record-marker still wrote to the gate log" \
-  || ok "T9: a refused record-marker wrote nothing to the gate log"
+{ [ "$rc" -eq 0 ] && grep -q '^TEAM_REVIEW .*decision=continue' "$ALOG"; } \
+  && ok "T9: continue with no TTY and no token is accepted (agent path)" || bad "T9: agent continue refused (rc=$rc) $out"
+grep -h '"verdict": "MARKER"' "$(dirname "$(dirname "$ALOG")")/gate-audit.ndjson" 2>/dev/null | grep -q '"provider": "agent"' \
+  && ok "T9: the MARKER audit row labels the path provider=agent" || bad "T9: MARKER audit row not labelled agent"
+
+# T9d: the documented Stage-4 example's arguments through the HARNESS (simulated
+# non-TTY via the _ISATTY seam). T9e below runs the same command directly.
+mkproj docex 2 2
+printf 'e\n' > "$TMP/docex/team_evaluator.md"; printf 's\n' > "$TMP/docex/team_security.md"
+DLOG="$(plog "$TMP/docex")"
+out="$(cd "$TMP/docex" && PLAN="$TMP/docex/plan.md" && HNO --cwd "$PWD" record-marker "$PLAN" \
+        --marker-roster Evaluator,Security --marker-outputs team_evaluator.md,team_security.md \
+        --marker-decision continue 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && grep -q '^TEAM_REVIEW .*roster=Evaluator,Security' "$DLOG" && grep -q '^TEAM_REVIEW .*decision=continue' "$DLOG"; } \
+  && ok "T9d: the documented Stage-4 record-marker example runs and records" || bad "T9d: doc example failed (rc=$rc) $out"
+
+# T9e: the same documented command run DIRECTLY -- the real review_gate.py, no
+# harness and no seam -- with stdin from /dev/null (a genuine non-TTY), as an
+# agent's tool call runs it. SDP_MARKER_HUMAN is explicitly unset.
+mkproj docdirect 2 2
+printf 'e\n' > "$TMP/docdirect/team_evaluator.md"; printf 's\n' > "$TMP/docdirect/team_security.md"
+DDLOG="$(plog "$TMP/docdirect")"
+out="$(cd "$TMP/docdirect" && PLAN="$TMP/docdirect/plan.md" && SDP_SCRIPTS="$SDP_ROOT/plugins/sdp/scripts" \
+        && unset SDP_MARKER_HUMAN && python3 "$SDP_SCRIPTS/review_gate.py" --cwd "$PWD" record-marker "$PLAN" \
+        --marker-roster Evaluator,Security --marker-outputs team_evaluator.md,team_security.md \
+        --marker-decision continue </dev/null 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && grep -q '^TEAM_REVIEW .*roster=Evaluator,Security' "$DDLOG" && grep -q '^TEAM_REVIEW .*decision=continue' "$DDLOG"; } \
+  && ok "T9e: the documented command, run directly with stdin </dev/null and no token, records" || bad "T9e: direct doc command failed (rc=$rc) $out"
+
+# no_team <log> <label>: grep 1 = no TEAM_ line (pass); 0 = a write (fail);
+# anything else = the log could not be read (fail -- no evidence is not a pass).
+no_team() {
+  grep -q '^TEAM_' "$1"; local g=$?
+  case "$g" in
+    1) ok "$2" ;;
+    0) bad "$2 -- a TEAM_ line was written" ;;
+    *) bad "$2 -- gate log unreadable (grep rc=$g)" ;;
+  esac
+}
+
+# T9b: pivot/halt still need the TTY and the token.
+mkproj humanonly 2 2
+HOLOG="$(plog "$TMP/humanonly")"
+for d in pivot halt; do
+  out="$(HNO --cwd "$TMP/humanonly" record-marker "$TMP/humanonly/plan.md" --marker-roster alice,bob \
+          --marker-outputs out1.md --marker-decision "$d" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+  { [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '^BLOCK: .*terminal'; } \
+    && ok "T9b: $d with no TTY is refused" || bad "T9b: $d no-TTY not refused (rc=$rc) $out"
+  out="$(RM_NOTOKEN --cwd "$TMP/humanonly" record-marker "$TMP/humanonly/plan.md" --marker-roster alice,bob \
+          --marker-outputs out1.md --marker-decision "$d" --i-am-recording-a-state-changing-decision 2>&1)"; rc=$?
+  { [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'SDP_MARKER_HUMAN'; } \
+    && ok "T9b: $d with no token is refused" || bad "T9b: $d no-token not refused (rc=$rc) $out"
+done
+no_team "$HOLOG" "T9b: refused pivot/halt wrote no TEAM_ line"
+
+# T9c: on the agent path the evidence checks still refuse.
+mkproj evid 2 2
+ELOG="$(plog "$TMP/evid")"
+out="$(HNO --cwd "$TMP/evid" record-marker "$TMP/evid/plan.md" --marker-roster alice,bob --marker-outputs missing.md 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'output not found: missing.md'; } \
+  && ok "T9c: missing outputs= file is refused (output not found)" || bad "T9c: missing outputs not refused for that reason (rc=$rc) $out"
+printf 'old\n' > "$TMP/evid/stale.md"; touch -t 200001010000 "$TMP/evid/stale.md"
+out="$(HNO --cwd "$TMP/evid" record-marker "$TMP/evid/plan.md" --marker-roster alice,bob --marker-outputs stale.md 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'stale output cited (pre-BLOCK): stale.md'; } \
+  && ok "T9c: outputs older than the opening BLOCK is refused (stale output)" || bad "T9c: stale outputs not refused for that reason (rc=$rc) $out"
+out="$(HNO --cwd "$TMP/evid" record-marker "$TMP/evid/plan.md" --marker-roster alice,alice --marker-outputs out1.md 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'roster has duplicate members'; } \
+  && ok "T9c: a roster with <2 distinct members is refused (duplicate members)" || bad "T9c: short roster not refused for that reason (rc=$rc) $out"
+no_team "$ELOG" "T9c: refused agent markers wrote no TEAM_ line"
 
 # ============================================================== T10 ===========
 # The IN-LOCK .inflight check is what decides; the pre-lock check is an early-exit
@@ -320,12 +441,12 @@ grep -q '^TEAM_' "$LOG" && bad "T10: the refused record-marker still appended a 
 rm -f "$INFLIGHT"
 
 # ============================================================== T13 ===========
-# decision=fix is accepted with ONLY the ADR-G02b gate (no second ceremony), and
+# decision=fix is accepted on the agent path (ADR-M1: no TTY, no token), and
 # falls through to review EXACTLY as continue does.
-out="$(RM --cwd "$PROJ" record-marker "$PROJ/plan.md" \
-        --marker-roster alice,bob --marker-outputs out1.md --marker-decision fix 2>&1)"; rc=$?
+out="$(HNO --cwd "$PROJ" record-marker "$PROJ/plan.md" \
+        --marker-roster alice,bob --marker-outputs out1.md --marker-decision fix 2>&1)"; rc=$?   # no TTY, no token
 { [ "$rc" -eq 0 ] && grep -q '^TEAM_REVIEW .*decision=fix' "$LOG"; } \
-  && ok "T13: decision=fix is accepted with only the TTY+token gate" \
+  && ok "T13: decision=fix is accepted on the agent path (no ceremony)" \
   || bad "T13: fix not accepted (rc=$rc) $out"
 set_claude_verdict "ALLOW: reviewed after fix"
 out="$(H --cwd "$PROJ" --reviewer claude review "$PROJ/plan.md" 2>&1)"; rc=$?

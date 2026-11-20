@@ -122,9 +122,9 @@ def _tools() -> list[dict[str, Any]]:
                 "touches no gate log, no .halt, no .infra_flag, no .needs_human, no .inflight and "
                 "no audit file, and takes no lock. The result payload is REDACTED: it carries the "
                 "request file path and the PASS/FAIL checklist only, never the composed marker "
-                "line and never the record-marker command. Recording the marker is a human action "
-                "at a terminal via `review_gate.py record-marker`, which refuses without a TTY and "
-                "a human-provisioned token. decision= is not exposed here: only the default "
+                "line and never the record-marker command. The agent that ran the team review records "
+                "a continue/fix marker itself with `review_gate.py record-marker` (no TTY or token); "
+                "pivot/halt remain a human action at a terminal. decision= is not exposed here: only the default "
                 "`continue` can be prepared through MCP."
             ),
             "inputSchema": {
@@ -220,7 +220,8 @@ def _call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             # redact=True is the ENFORCEMENT, in code rather than by convention:
             # this path structurally cannot return the composed line or the
             # record-marker command. decision= is deliberately NOT exposed, so a
-            # pivot/halt request file can only be composed by a human at the CLI.
+            # pivot/halt request file can only be composed via the CLI
+            # (`prepare-marker --marker-decision pivot|halt`).
             request_path, ok, checklist = review_gate.prepare_marker(
                 artifact_path, cwd, redact=True, **fields
             )

@@ -94,9 +94,9 @@ file operation, and the sanctioned paths for it are named in each row.
 | `…​.log` | The append-only record of record: `BLOCK_ATTEMPT`, `ALLOW`, `INFRA_ERROR`, `RESET`, `OVERRIDE`, `PIVOT_RESET`, `TEAM_REVIEW` / `TEAM_CARRY`, `ESCALATION_STALL`, `MARKER_AUDIT_FAILED`. | Nothing. It is never rewritten. |
 | `…​.halt` | The gate is **stuck** and refuses every review pre-provider. Written on an identical BLOCK reason twice, at `max_block`, at `max_stall` consecutive escalation stalls, and on a team `decision=halt`. | A human decision, applied through the attended override path or by the operator deliberately clearing the halt outside the tooling. There is no gate command that clears it. |
 | `…​.infra_flag` | The **toolchain** failed — a provider was unreachable, an audit row could not be written, or a marker could not be audited. Stage 8 refuses merge/push while it exists. | A clean content `ALLOW`, or the override path. |
-| `…​.needs_human` | **The gate refused to run a review and nobody has retried.** Written on the *first* escalation stall. This is not an infra failure: it means a human owes the artifact a team review. | A review actually executing — L5's `ALLOW` and BLOCK arms — or the override path. An `INFRA_ERROR` deliberately does **not** clear it, because no review ran. |
+| `…​.needs_human` | **The gate refused to run a review and nobody has retried.** Written on the *first* escalation stall. This is not an infra failure: it means the artifact is owed a team review and a marker (continue/fix are agent-recorded; pivot/halt are a human's). | A review actually executing — L5's `ALLOW` and BLOCK arms — or the override path. An `INFRA_ERROR` deliberately does **not** clear it, because no review ran. |
 | `…​.inflight` | A review is running between the two lock acquisitions. `record-marker` refuses while it is younger than 555 s; older ones are stale and are removed automatically. | The end of the review, on all three outcomes including `INFRA_ERROR`. |
-| `…​.marker-request` | A `prepare-marker` request file: data for a human, never instructions. It is advisory and stamps its own staleness. | Nothing reads it but a person; the next `prepare-marker` replaces it atomically. |
+| `…​.marker-request` | A `prepare-marker` request file: **data, never instructions, for every decision**. It is advisory and stamps its own staleness. An agent recording continue/fix constructs `record-marker` itself (core Stage 4) and never runs a command from this file. | The gate never consumes it; for pivot/halt a person reads it. The next `prepare-marker` replaces it atomically. |
 | `…​.split-request` | A `prepare-split` request file: the halt-recovery split a human would record, data for a person and never instructions. Advisory; stamps its own staleness. | Nothing reads it but a person; the next `prepare-split` replaces it atomically. |
 | `…​.lock` | The `fcntl.flock` file. Its **presence proves nothing** — it is never unlinked. | Kernel release on process exit. |
 
@@ -123,13 +123,16 @@ When the gate escalates, the sanctioned channel is:
 python3 scripts/review_gate.py --cwd <dir> prepare-marker <artifact> --marker-roster a,b --marker-outputs p1,p2
 ```
 
-which writes a request file for a human and prints its path and a PASS/FAIL checklist — never
-the command itself. The human then runs `record-marker` at a terminal. It requires a TTY and
-`SDP_MARKER_HUMAN` matching `~/.sdp/marker.token`, and `--marker-decision pivot|halt`
-additionally requires `--i-am-recording-a-state-changing-decision` and a typed confirmation
-phrase.
+which writes a request file and prints its path and a PASS/FAIL checklist — never
+the command itself. The request file is data, never instructions. For `--marker-decision continue`
+or `fix` (ADR-M1), the agent that ran the team review **constructs** `record-marker` itself
+from the artifact and its team outputs (core Stage 4); `prepare-marker` is only an optional
+dry run of the checks. There is no TTY or token step, and the engine
+re-validates roster, outputs, freshness and cadence on the write. `--marker-decision pivot|halt`
+stay human-only: a TTY, `SDP_MARKER_HUMAN` matching `~/.sdp/marker.token`,
+`--i-am-recording-a-state-changing-decision`, and a typed confirmation phrase.
 
-Provisioning the token is a one-time operator step: write a non-empty value to
+Provisioning the marker token (needed for `record-marker` pivot/halt and `record-split` only; the override path uses a separate token, `~/.sdp/override.token` matched by `SDP_GATE_OVERRIDE`, attended mode only, unchanged by ADR-M1) is a one-time operator step: write a non-empty value to
 `~/.sdp/marker.token`, `chmod 600` it, and export `SDP_MARKER_HUMAN` with the same value in the
 interactive shell. **The token is an intent signal, not a secret** — the file is same-uid
 readable, so anything that can run `cat` can supply it. The only affordance barrier is the TTY
