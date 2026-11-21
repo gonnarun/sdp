@@ -22,7 +22,13 @@ fi
 TMP="$(mktemp -d -t sdp_run_seg.XXXXXX)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/batch" "$TMP/seg"
 export CLAUDE_PROJECT_DIR="$SDP_ROOT"   # resolve .sdp/defaults.yaml
-export SDP_SESSION_CWD="$SDP_ROOT"      # Codex runner requires a git-backed cwd
+# Codex runner requires a git-backed cwd. A throwaway repo, never $SDP_ROOT:
+# a non-dryrun call arms the run (.private/sdp-run.json) at this cwd's git root,
+# and a record left in the real checkout holds every interactive session there.
+WT="$TMP/wt"; mkdir -p "$WT" && git -C "$WT" init -q
+export SDP_SESSION_CWD="$WT"
+real_rec="$(git -C "$SDP_ROOT" rev-parse --show-toplevel)/.private/sdp-run.json"
+real_rec_before="$( [ -e "$real_rec" ] && cksum < "$real_rec" || echo absent)"
 run() { SDP_TMUX_DRYRUN=1 bash "$RUN" "$@" >/dev/null 2>&1; echo $?; }
 
 # exit codes
@@ -153,6 +159,9 @@ statusexit() {
 [ "$(statusexit PAUSE_USER_INPUT_REQUIRED)" = 12 ] && ok "REQ-034: STATUS.md=PAUSE_USER_INPUT_REQUIRED -> exit 12 (NON-success)" || bad "REQ-034 PAUSE exit 12"
 [ "$(statusexit WeirdUnknownState)" = 9 ]          && ok "REQ-034: unrecognized STATUS.md content -> exit 9 (fail-closed NON-success)" || bad "REQ-034 unknown exit 9"
 rm -f "$TMP/batch/.tmux_session_name"
+[ -e "$WT/.private/sdp-run.json" ] && ok "control: non-dryrun continue armed the throwaway worktree" || bad "control: throwaway worktree not armed (leak guard below proves nothing)"
+real_rec_after="$( [ -e "$real_rec" ] && cksum < "$real_rec" || echo absent)"
+[ "$real_rec_after" = "$real_rec_before" ] && ok "real checkout run record untouched" || bad "test armed the real checkout: $real_rec"
 
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]
