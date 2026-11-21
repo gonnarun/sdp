@@ -14,7 +14,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04, not ubuntu-latest: ubuntu-latest moved to 26.04, and
+        # actions/python-versions ships no 3.9 build for it (3.9.25 covers
+        # 22.04 and 24.04 only), so setup-python fails before any test runs.
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       # Actions are pinned to a commit SHA, not a tag: a tag is mutable and can
