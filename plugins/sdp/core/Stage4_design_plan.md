@@ -89,6 +89,8 @@ Record meaningful decisions as compact **ADRs** (REQ-D-03): decision + alternati
 ### Step 1: {name} — preconditions: none — files: …
 ### Step 2: {name} — preconditions: Step 1 done — files: …
 
+> **State contracts, not helper bodies (issue #6).** When the plan needs a script or helper, write its contract: inputs, outputs and failure behavior. Leave its body to Stage 5, where tests prove it. A pasted body invites line-by-line review at the wrong altitude.
+
 ## 6. Per-file change spec  ← REQ→file traceability (REQ-D-04): every changed file cites the REQ(s) it serves
 | Path | Change type | Core change | REQ(s) |
 
@@ -184,6 +186,9 @@ The gate reviews the artifact for:
 - **FIX** — **actual replacement text**, or the function and line for code. *"Clarify X" is not a fix.*
 - **VERIFY** — a runnable `grep`/command, or the exact sentence that must now read differently.
 - **SEVERITY** — `blocking` | `advisory`.
+  - **`blocking`** means: left unfixed, the delivered change would behave wrongly, lose or expose data, weaken a security or compliance invariant, or miss a Must REQ. **Everything else is `advisory`**: document consistency, wording, overstatement, cross-section drift, typos, and the precision of the artifact's own verification text (issue #6).
+  - The gate engine reads these labels. A reviewer `BLOCK:` whose findings are all well-formed and all `advisory` resolves to `ALLOW:` (see SDP.md "Severity-derived ALLOW").
+  - **Plan altitude.** In a plan, design or fix-plan, a code body is judged only against the contract it claims. A defect inside the body is `advisory` and becomes a required test case, unless the contract itself violates an invariant.
 - **SCOPE** — `closeable-in-this-dispatch` | `must-be-recorded-instead`.
 
 **A finding missing any field MUST be labelled exactly `INCOMPLETE - <field> not supplied because <reason>`; no field may be omitted silently.**

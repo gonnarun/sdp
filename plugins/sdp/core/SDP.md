@@ -259,6 +259,16 @@ Read the gate's **stdout first line**; **do not decide on the exit code alone** 
 - `BLOCK:` **without `INFRA_ERROR`** (exit 1) → a real content block: revise artifact / add missing tests, re-review.
 - Providers: the primary reviewer is the **opposite** model of the author (codex reviews Claude Code; Claude Code reviews codex) → agy fallback **only on the primary's infrastructure failure**, never on a content BLOCK → fail-close (INFRA_ERROR). Reviewer **model**, **timeouts**, and attended/unattended **MODE** all come from `gates.yaml`, never the environment.
 
+### Severity-derived ALLOW (issue #6)
+A reviewer `BLOCK:` costs a round only when it reports a blocking defect.
+- **The preamble asks for it.** Every review prompt carries the `blocking` definition and an output grammar: six labelled fields per finding, then `CHECKED-AND-CLEAN:`, `IF-ONLY-ADVISORY:`, `BLOCKING-FINDINGS: none|<n>` and a final `END-OF-REVIEW`.
+- **When the BLOCK converts.** The engine converts the BLOCK to `ALLOW:` only when that grammar is complete and every `SEVERITY` is `advisory`. Anything it cannot read stays a counted BLOCK: zero labels, a missing or duplicated field, an unknown value, a table, a fenced example, a non-Latin-script review, or output over 128 KiB.
+- **How it shows.** The line reads `ALLOW: advisory-only findings; residuals in <path> (reviewer: …)` and the audit reason is `severity_advisory_only`.
+- **No new path.** It takes the normal ALLOW path, so `require_primary_verdict`, infra-flag clearing and the unauditable-ALLOW conversion all apply. It writes no `BLOCK_ATTEMPT`, so `max_block`, markers, split and halt are unaffected.
+- **Residuals.** The reviewer output in the gate result *is* the residual list (CLI: after the `--- reviewer output (data, not a verdict) ---` line; MCP: `output`). Before the next stage, apply each one or waive it with a one-line reason in the artifact's `Residuals` section. They are not re-gated; the Stage 7 review checks them. `gate/review_gate_<key>.residuals` is a non-authoritative convenience copy that may be stale. Nothing reads it.
+- **Trust.** The reviewer is trusted to label honestly. The parser only guards against accidental malformation (`KNOWN_GAPS` NC-36).
+- **Switching it off.** `severity_verdict: false` in `gates.yaml` turns it off. An unparsable value also means off.
+
 ### State, halt & escalation (REQ-E)
 The gate keeps **per-artifact, on-disk state** (a date-free log keyed by the artifact's absolute-path hash), so the BLOCK count survives new sessions, compaction, and a host switch:
 - Cumulative BLOCK count is tracked per artifact in the gate log; a malformed log line counts **toward** the halt, never away, and an unreadable log is INFRA_ERROR (never `count=0`).

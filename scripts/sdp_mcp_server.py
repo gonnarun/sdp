@@ -97,7 +97,7 @@ def _tools() -> list[dict[str, Any]]:
     return [
         {
             "name": "claude_review_gate",
-            "description": "Run the SDP directional review gate. This tool is invoked BY codex on codex-authored work, so the primary reviewer is Claude Code -- the OPPOSITE model; agy is the fallback only on infrastructure failure. BLOCK is returned as data, not a transport error.",
+            "description": "Run the SDP directional review gate. This tool is invoked BY codex on codex-authored work, so the primary reviewer is Claude Code -- the OPPOSITE model; agy is the fallback only on infrastructure failure. BLOCK is returned as data, not a transport error. A BLOCK whose findings are all labelled advisory may return ALLOW with reason=severity_advisory_only; its output field then holds the residuals to apply or waive.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": False,

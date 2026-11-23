@@ -506,5 +506,20 @@ for f in skills/sdp/SKILL.md skills/batch-sdp/SKILL.md skills/worktree-dispatch/
     || bad "(xv-b) $f: no warning against copying the shared core's Claude-side gate block"
 done
 
+# ---- (xi) issue #6: the severity-derived ALLOW is documented in both trees ----
+for tree in core plugins/sdp/core; do
+  { grep -q '^### Severity-derived ALLOW (issue #6)' "$tree/SDP.md" \
+    && grep -q 'Residuals' "$tree/SDP.md" \
+    && grep -q 'severity_verdict: false' "$tree/SDP.md" \
+    && grep -q 'State contracts, not helper bodies' "$tree/Stage4_design_plan.md" \
+    && grep -q '\*\*`blocking`\*\* means' "$tree/Stage4_design_plan.md" \
+    && grep -q '\*\*Residuals\*\* from every severity-derived ALLOW' "$tree/Stage7_test_exec.md"; } \
+    && ok "(xi) $tree documents the severity-derived ALLOW, residuals and plan altitude" \
+    || bad "(xi) $tree is missing the issue #6 rules"
+done
+grep -q '^| \*\*NC-36\*\*' docs/KNOWN_GAPS.md && grep -q '`…​.residuals`' docs/GATE_OPERATIONS.md \
+  && ok "(xi) KNOWN_GAPS NC-36 and the GATE_OPERATIONS .residuals row exist" \
+  || bad "(xi) NC-36 or the .residuals row is missing"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

@@ -144,6 +144,8 @@ The gate enforces a single **550s** wall budget (`GATE_WALL_BUDGET`, ADR-008) ac
 - **FIX** — **actual replacement text**, or the function and line for code. *"Clarify X" is not a fix.*
 - **VERIFY** — a runnable `grep`/command, or the exact sentence that must now read differently.
 - **SEVERITY** — `blocking` | `advisory`.
+  - **`blocking`** means: left unfixed, the delivered change would behave wrongly, lose or expose data, weaken a security or compliance invariant, or miss a Must REQ. **Everything else is `advisory`**: document consistency, wording, overstatement, cross-section drift, typos, and the precision of the artifact's own verification text (issue #6).
+  - The gate engine reads these labels. A reviewer `BLOCK:` whose findings are all well-formed and all `advisory` resolves to `ALLOW:` (see SDP.md "Severity-derived ALLOW").
 - **SCOPE** — `closeable-in-this-dispatch` | `must-be-recorded-instead`.
 
 **A finding missing any field MUST be labelled exactly `INCOMPLETE - <field> not supplied because <reason>`; no field may be omitted silently.**
@@ -213,6 +215,7 @@ limit does exist: an artifact over 512,000 bytes is refused by the gate before a
 8. PASS/CONDITIONAL verdict matches the Evaluator's criteria (a FAIL result is not gated here — it auto-enters the fix loop).
 9. Ready for Stage 8 (manual items + DB-verify SQL clear in the result).
 10. Invariant/rule non-compliance = 0, recorded (per `.sdp/project-rules.md`).
+11. **Residuals** from every severity-derived ALLOW in this run (plan, fix-plan, design) are applied or waived with a one-line reason in that artifact's `Residuals` section.
 
 > Dimensions 1–3, 7–9 are generic. 4–6, 10 lean on `.sdp/project-rules.md` for project specifics.
 

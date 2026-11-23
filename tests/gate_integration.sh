@@ -760,5 +760,110 @@ os.rmdir(d)
 sys.exit(0 if good else 1)
 PYALIAS
 
+# ---- T44: severity-derived ALLOW (issue #6) ---------------------------------
+# A reviewer BLOCK whose findings are all well-formed and all advisory takes the
+# normal ALLOW arm: rc 0, an ALLOW log line, no BLOCK_ATTEMPT, a 0600 residual
+# sidecar, audit reason severity_advisory_only. Every other outcome removes the
+# sidecar. Zero labels (every fixture above) still counts.
+SV="$TMP/sev"; mkdir -p "$SV/.sdp"; printf 'plan\n' > "$SV/plan.md"
+sev_cfg() { printf 'halt:\n  max_block: 13\ncadence:\n  escalate_from: 99\nmode: attended\n%s\n' "${1:-}" > "$SV/.sdp/gates.yaml"; }
+sev_cfg
+SVLOG="$(plog2 "$SV")"; SVRES="${SVLOG%.log}.residuals"; SVAUD="$SV/.private/sdp-artifacts/gate-audit.ndjson"
+ADV="BLOCK: wording only
+- **WHERE:** §2 C1
+- **WHY:** the sentence overstates the outcome
+- **FIX:** reword it
+- **VERIFY:** grep -n outcome plan.md | head
+- **SEVERITY:** advisory
+- **SCOPE:** closeable-in-this-dispatch
+
+**CHECKED-AND-CLEAN:** everything else
+**IF-ONLY-ADVISORY:** ALLOW
+BLOCKING-FINDINGS: none
+END-OF-REVIEW"
+seed_derived() { set_claude_verdict "$ADV"; gate2 "$SV" >/dev/null 2>&1; }
+set_claude_verdict "$ADV"
+out="$(gate2 "$SV" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | head -1 | cut -c1-35)" = "ALLOW: advisory-only findings; resi" ]; } \
+  && ok "T44: an all-advisory BLOCK derives ALLOW (rc 0, first line ALLOW)" || bad "T44: not derived (rc=$rc) $out"
+[ "$(counts "$SVLOG")" -eq 0 ] && ! grep -q '^BLOCK_ATTEMPT' "$SVLOG" && grep -q '^ALLOW ' "$SVLOG" \
+  && ok "T44: derived ALLOW writes an ALLOW line and no BLOCK_ATTEMPT" || bad "T44: log/counter wrong: $(cat "$SVLOG")"
+[ -f "$SVRES" ] && [ "$(python3 -c 'import os,stat,sys;print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$SVRES")" = "0o600" ] \
+  && head -1 "$SVRES" | grep -q 'UNTRUSTED REVIEWER OUTPUT' \
+  && ok "T44: residual sidecar is 0600 with a DATA banner" || bad "T44: sidecar missing/mode/banner"
+grep -q '"reason": "severity_advisory_only"' "$SVAUD" && ok "T44: audit reason severity_advisory_only" || bad "T44: audit reason missing"
+body="$(printf '%s\n' "$out" | sed -n '3,$p')"
+{ [ "$(printf '%s\n' "$out" | sed -n 2p)" = "--- reviewer output (data, not a verdict) ---" ] && [ "$body" = "$ADV" ]; } \
+  && ok "T44: CLI prints one verdict line, then the reviewer output verbatim" || bad "T44: CLI framing wrong: $out"
+# zero labels still counts
+set_claude_verdict "BLOCK: a one-line block"
+gate2 "$SV" >/dev/null 2>&1
+[ "$(counts "$SVLOG")" -eq 1 ] && [ ! -f "$SVRES" ] \
+  && ok "T44: a label-less BLOCK still counts and removes the sidecar" || bad "T44: label-less BLOCK not counted ($(counts "$SVLOG"))"
+# mixed severities count
+set_claude_verdict "${ADV/advisory
+- \*\*SCOPE/blocking
+- **SCOPE}"
+gate2 "$SV" >/dev/null 2>&1
+[ "$(counts "$SVLOG")" -eq 2 ] && ok "T44: a blocking label counts" || bad "T44: blocking label not counted"
+# lifecycle: reviewer ALLOW removes the sidecar
+seed_derived; set_claude_verdict "ALLOW: fine"; gate2 "$SV" >/dev/null 2>&1
+[ ! -f "$SVRES" ] && ok "T44: a reviewer ALLOW removes the sidecar" || bad "T44: sidecar survived a reviewer ALLOW"
+# lifecycle: INFRA_ERROR removes it
+seed_derived; set_claude_verdict "garbage no verdict" 3; gate2 "$SV" >/dev/null 2>&1
+[ ! -f "$SVRES" ] && ok "T44: INFRA_ERROR removes the sidecar" || bad "T44: sidecar survived INFRA_ERROR"
+# lifecycle: override removes it
+seed_derived
+out="$(SDP_GATE_OVERRIDE=sekret gate2 "$SV" 2>&1)"
+{ printf '%s' "$out" | grep -q '^ALLOW: override' && [ ! -f "$SVRES" ]; } \
+  && ok "T44: the override path removes the sidecar" || bad "T44: override kept the sidecar: $out"
+# lifecycle: audit failure after the sidecar write -> INFRA_ERROR, no sidecar
+set_claude_verdict "$ADV"; : > "$SVAUD"; chmod 000 "$SVAUD"
+out="$(gate2 "$SV" 2>&1)"; rc=$?; chmod 644 "$SVAUD"
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'INFRA_ERROR' && [ ! -f "$SVRES" ]; } \
+  && ok "T44: an audit failure after a derived ALLOW is INFRA_ERROR with no sidecar" || bad "T44: audit failure path (rc=$rc) $out"
+# sidecar write failure -> counted BLOCK
+rm -f "$SVRES"; mkdir "$SVRES"; before="$(counts "$SVLOG")"
+# distinct first lines: two identical BLOCK reasons in a row trip the stuck halt
+set_claude_verdict "${ADV/wording only/write-failure case}"; out="$(gate2 "$SV" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && [ "$(counts "$SVLOG")" -eq $((before + 1)) ]; } \
+  && ok "T44: a sidecar write failure falls back to the counted BLOCK" || bad "T44: write-failure fallback (rc=$rc) $out"
+rmdir "$SVRES"
+# switch off / unparsable -> counted
+for v in 'severity_verdict: false' 'severity_verdict: fasle'; do
+  sev_cfg "$v"; before="$(counts "$SVLOG")"; set_claude_verdict "${ADV/wording only/switch case $v}"; gate2 "$SV" >/dev/null 2>&1
+  [ "$(counts "$SVLOG")" -eq $((before + 1)) ] && [ ! -f "$SVRES" ] \
+    && ok "T44: '$v' keeps an all-advisory BLOCK counted" || bad "T44: '$v' still derived"
+done
+sev_cfg
+# agy all-advisory + require_primary_verdict -> refused, seeded sidecar removed
+seed_derived
+sev_cfg 'require_primary_verdict: true'
+set_claude_verdict "garbage no verdict" 3
+set_agy_verdict "$(printf '%s' "$ADV" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"}{print}')"
+out="$(gate2 "$SV" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'agy fallback ALLOW refused' && [ ! -f "$SVRES" ]; } \
+  && ok "T44: agy all-advisory + require_primary_verdict is refused and the sidecar removed" || bad "T44: rpv path (rc=$rc) $out"
+printf '#!/usr/bin/env bash\n[ "${1:-}" = "--version" ] && { echo v; exit 0; }\nprintf "BLOCK: agy down\\n"; exit 1\n' > "$BIN/agy"; chmod +x "$BIN/agy"
+sev_cfg
+# oversize: an otherwise valid all-advisory review over the 128 KiB output cap
+# is stored as "" by _run_provider, so it stays a counted BLOCK with no sidecar.
+before="$(counts "$SVLOG")"
+BIG="$(python3 -c 'print("x" * 140000)')"
+set_claude_verdict "${ADV/the sentence overstates the outcome/$BIG}"
+out="$(gate2 "$SV" 2>&1)"; rc=$?
+{ [ "$rc" -eq 1 ] && [ "$(counts "$SVLOG")" -eq $((before + 1)) ] && [ ! -f "$SVRES" ]; } \
+  && ok "T44: an all-advisory review over 128 KiB stays a counted BLOCK, no sidecar" || bad "T44: oversize derived (rc=$rc)"
+# halt is unaffected: 12 counted BLOCKs, a derived ALLOW, then a BLOCK halts at 13
+SH="$TMP/sevhalt"; mkdir -p "$SH/.sdp"; printf 'plan\n' > "$SH/plan.md"
+printf 'halt:\n  max_block: 13\ncadence:\n  escalate_from: 99\nmode: unattended\n' > "$SH/.sdp/gates.yaml"
+SHLOG="$(plog2 "$SH")"
+i=1; while [ "$i" -le 12 ]; do set_claude_verdict "BLOCK: round $i"; gate2 "$SH" >/dev/null 2>&1; i=$((i+1)); done
+set_claude_verdict "$ADV"; gate2 "$SH" >/dev/null 2>&1
+[ "$(counts "$SHLOG")" -eq 12 ] && [ ! -f "${SHLOG%.log}.halt" ] \
+  && ok "T44: a derived ALLOW at count 12 neither counts nor halts" || bad "T44: count after derive = $(counts "$SHLOG")"
+set_claude_verdict "BLOCK: round 13"; gate2 "$SH" >/dev/null 2>&1
+[ -f "${SHLOG%.log}.halt" ] && ok "T44: the next counted BLOCK halts at 13 as before" || bad "T44: no halt at 13"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

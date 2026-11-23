@@ -680,5 +680,124 @@ PYEOF
   fi
 done
 
+# ---- issue #6: _advisory_only() predicate (synthetic fixtures only) ----------
+# Every fixture is hand-written here; no real reviewer transcript is copied into
+# the repository. Each row: expected result, name, text.
+for tree in plugins/sdp/scripts scripts; do
+  SEV_OUT_FILE="$(mktemp)"
+  python3 - "$tree" > "$SEV_OUT_FILE" <<'PYSEV'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
+import review_gate as r
+tree = sys.argv[1]
+GOOD = """BLOCK: wording only
+- **WHERE:** §2 C1
+- **WHY:** the sentence overstates the outcome; the severity of this is low.
+- **FIX:** reword
+- **VERIFY:** `grep -n x file | head`
+- **SEVERITY:** advisory
+- **SCOPE:** closeable-in-this-dispatch
+
+1. **WHERE** — §3, a WHERE-delimited note
+   **WHY** — fix-up wording
+   **FIX** — change "a" to "b"
+   **VERIFY** — reread, and the value
+   continues on this line
+   **SEVERITY** — advisory.
+   **SCOPE** — closeable-in-this-dispatch
+
+**CHECKED-AND-CLEAN:** the rest → fine
+**IF-ONLY-ADVISORY:** ALLOW
+BLOCKING-FINDINGS: **none**
+**END-OF-REVIEW**
+"""
+PLAIN = """BLOCK: Severity parsing note
+WHERE: §1
+WHY: typo
+FIX: fix it
+VERIFY: reread
+SEVERITY: advisory
+SCOPE: closeable-in-this-dispatch
+CHECKED-AND-CLEAN: rest
+IF-ONLY-ADVISORY: ALLOW
+BLOCKING-FINDINGS: none
+END-OF-REVIEW"""
+
+
+def mut(a, b, base=GOOD):
+    assert a in base, a
+    return base.replace(a, b, 1)
+
+
+# Synthetic stand-ins shaped like real design-gate reviews: bold labels, §
+# references, numbered findings, a blocking label in each.
+REALISH = [
+    "BLOCK: x\n1. **WHERE:** §2 C2b\n   **WHY:** a\n   **FIX:** b\n   **VERIFY:** c\n   **SEVERITY:** blocking\n   **SCOPE:** closeable-in-this-dispatch\n\n**CHECKED-AND-CLEAN:** d\n**IF-ONLY-ADVISORY:** e\n",
+    "BLOCK: y\n- **WHERE** — §2 C4\n- **WHY** — a\n- **FIX** — b\n- **VERIFY** — c\n- **SEVERITY** — blocking\n- **SCOPE** — closeable-in-this-dispatch\n\nCHECKED-AND-CLEAN: d\nIF-ONLY-ADVISORY: ALLOW once fixed.\nBLOCKING-FINDINGS: 1\nEND-OF-REVIEW\n",
+    "BLOCK: z\nWHERE: §5\nWHY: a\nFIX: b\nVERIFY: c\nSEVERITY: blocking\nSCOPE: closeable-in-this-dispatch\nWHERE: §6\nWHY: a\nFIX: b\nVERIFY: c\nSEVERITY: advisory\nSCOPE: closeable-in-this-dispatch\nCHECKED-AND-CLEAN: d\nIF-ONLY-ADVISORY: e\nBLOCKING-FINDINGS: 1\nEND-OF-REVIEW\n",
+]
+cases = [
+    (True, "well-formed bold/numbered/§/continuation", GOOD),
+    (True, "plain labels; Title-case Severity in the summary line", PLAIN),
+    (True, "SEVERITY : advisory with a space before the colon", mut("SEVERITY: advisory", "SEVERITY : advisory", PLAIN)),
+    (False, "empty (oversized output is stored as empty)", ""),
+    (False, "zero labels", "BLOCK: one line only\n"),
+    (False, "a blocking label", mut("**SEVERITY** — advisory.", "**SEVERITY** — blocking")),
+    (False, "an unknown value", mut("**SEVERITY** — advisory.", "**SEVERITY** — high")),
+    (False, "an annotated value", mut("**SEVERITY** — advisory.", "**SEVERITY** — advisory (minor)")),
+    (False, "a missing FIX", mut("- **FIX:** reword\n", "")),
+    (False, "a duplicate SEVERITY", mut("- **SEVERITY:** advisory\n", "- **SEVERITY:** advisory\n- **SEVERITY:** advisory\n")),
+    (False, "an INCOMPLETE field", mut("- **FIX:** reword", "- **FIX:** INCOMPLETE - FIX not supplied because x")),
+    (False, "a field label before the first WHERE", mut("- **WHERE:** §2 C1", "WHY: stray\n- **WHERE:** §2 C1")),
+    (False, "no CHECKED-AND-CLEAN", mut("**CHECKED-AND-CLEAN:** the rest → fine\n", "")),
+    (False, "BLOCKING-FINDINGS: 1", mut("BLOCKING-FINDINGS: **none**", "BLOCKING-FINDINGS: 1")),
+    (False, "two BLOCKING-FINDINGS lines", mut("BLOCKING-FINDINGS: **none**", "BLOCKING-FINDINGS: none\nBLOCKING-FINDINGS: none")),
+    (False, "no END-OF-REVIEW (truncated)", mut("**END-OF-REVIEW**\n", "")),
+    (False, "END-OF-REVIEW not last", mut("**END-OF-REVIEW**\n", "**END-OF-REVIEW**\nmore\n")),
+    (False, "homoglyph SEVERITY", mut("   **FIX** — change", "ЅEVERITY: blocking\n   **FIX** — change")),
+    (False, "soft hyphen inside a token", mut("   **FIX** — change", "SEVER­ITY: blocking\n   **FIX** — change")),
+    (False, "box-drawing table cell", mut("**CHECKED", "│ SEVERITY │ blocking │\n**CHECKED")),
+    (False, "pipe table cell", mut("**CHECKED", "| x | **SEVERITY:** blocking |\n**CHECKED")),
+    (False, "pipe-less table row", mut("**CHECKED", "WHERE: x | SEVERITY: blocking\n**CHECKED")),
+    (False, "severity blocking word pair in prose", mut("**CHECKED", "note: severity blocking here\n**CHECKED")),
+    (False, "SEVERITY = blocking", mut("**CHECKED", "SEVERITY = blocking\n**CHECKED")),
+    (False, "heading with Severity", mut("**CHECKED", "## Severity high\n**CHECKED")),
+    (False, "quote with SEVERITY", mut("**CHECKED", "> SEVERITY blocking\n**CHECKED")),
+    (False, "inline label in prose", mut("reword\n", "reword, see SEVERITY: blocking\n")),
+    (False, "fenced example", mut("**CHECKED", "```\nSEVERITY: advisory\n```\n**CHECKED")),
+    (False, "unterminated fence", mut("**CHECKED", "```\nnote\n**CHECKED")),
+    (False, "one complete advisory finding + a second finding without SEVERITY",
+     mut("**CHECKED", "WHERE: §9\nWHY: a\nFIX: b\nVERIFY: c\nSCOPE: closeable-in-this-dispatch\n**CHECKED")),
+    (False, "separate advisory and blocking findings (mixed severities)",
+     mut("**CHECKED", "WHERE: §9\nWHY: a\nFIX: b\nVERIFY: c\nSEVERITY: blocking\nSCOPE: closeable-in-this-dispatch\n**CHECKED")),
+    (False, "two advisory labels in one finding and none in another",
+     mut("- **SEVERITY:** advisory\n", "- **SEVERITY:** advisory\n- **SEVERITY:** advisory\n",
+         mut("**CHECKED", "WHERE: §9\nWHY: a\nFIX: b\nVERIFY: c\nSCOPE: closeable-in-this-dispatch\n**CHECKED"))),
+    (False, "tab-separated row with an uppercase decision token", mut("**CHECKED", "WHERE\tx\tSEVERITY\tblocking\n**CHECKED")),
+    (False, "tab-separated lowercase severity cell", mut("**CHECKED", "x\tseverity\tblocking\n**CHECKED")),
+    (False, "non-Latin-script review", mut("the sentence overstates the outcome", "문장이 과장됐다")),
+] + [(False, f"synthetic real-shaped review {i}", t) for i, t in enumerate(REALISH, 1)]
+for want, name, text in cases:
+    got = r._advisory_only(text)
+    print(("ok   - " if got == want else "FAIL - ") + f"{tree}: _advisory_only {name} -> {want}")
+# The preamble carries the grammar, ahead of the untrusted artifact.
+text = r._review_prompt("req", Path("a.md"), "ART")
+ok = r.SEVERITY_RULE in text and text.index(r.SEVERITY_RULE) < text.index("BEGIN_UNTRUSTED_ARTIFACT")
+ok = ok and all(t in r.SEVERITY_RULE for t in ("SEVERITY: blocking", "BLOCKING-FINDINGS:", "END-OF-REVIEW", "INCOMPLETE - <field>"))
+print(("ok   - " if ok else "FAIL - ") + f"{tree}: preamble carries the severity rule and output grammar")
+# Design C6: absent -> on, parsable -> value, unparsable -> off.
+ok = (r._severity_verdict_enabled(None) and r._severity_verdict_enabled("true")
+      and not r._severity_verdict_enabled("false") and not r._severity_verdict_enabled("fasle"))
+print(("ok   - " if ok else "FAIL - ") + f"{tree}: severity_verdict absent=on, false=off, unparsable=off")
+PYSEV
+  sev_rc=$?
+  sev_out="$(cat "$SEV_OUT_FILE")"; rm -f "$SEV_OUT_FILE"
+  printf '%s\n' "$sev_out"
+  PASS=$((PASS + $(printf '%s\n' "$sev_out" | grep -c '^ok')))
+  FAIL=$((FAIL + $(printf '%s\n' "$sev_out" | grep -c '^FAIL')))
+  [ "$sev_rc" -eq 0 ] || bad "$tree: _advisory_only test harness crashed (rc=$sev_rc)"
+done
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]
