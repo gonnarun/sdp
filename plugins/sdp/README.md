@@ -285,9 +285,9 @@ The marker is honor-plus-evidence: the gate checks roster cardinality, distinctn
 
 Running `record-marker` twice is safe and the **second marker wins**: both lines stay in the log as an audit trail, and only the last is consumed by the escalation check. `--marker-decision pivot` and `--marker-decision halt` change gate state, so they are human-only (see above).
 
-### After a halt: report, or split
+### After a halt: report, release, or split
 
-A halt is terminal for that artifact. The gate prints the whole procedure in the halt body — an agent's only move is to **stop and report** (artifact path, halt reason, cumulative BLOCK count, last finding, resolved vs unresolved). `RESET` / `OVERRIDE` / `PIVOT_RESET` and `SDP_GATE_OVERRIDE` are human-only levers and an agent must not use them **or offer them as options**; team markers are not consulted at all once `.halt` exists.
+A halt is terminal for that artifact. The gate prints the whole procedure in the halt body — an agent's only move is to **stop and report** (artifact path, halt reason, cumulative BLOCK count, last finding, resolved vs unresolved). The halt body ends with a `FOR THE HUMAN` section holding the exact `release-halt` commands (reset and review again, or `--accept` this exact version as owner), in the project's locale; the agent relays it verbatim and cannot run it (TTY + `~/.sdp/marker.token`). `RESET` / `OVERRIDE` / `PIVOT_RESET` and `SDP_GATE_OVERRIDE` stay human-only levers an agent must not use **or offer as options**; team markers are not consulted at all once `.halt` exists.
 
 When the halt is really a **scope** problem — every round raises a different defect rather than the same one — the sanctioned recovery is to split the artifact:
 

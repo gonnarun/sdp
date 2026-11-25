@@ -6,6 +6,7 @@ claude_timeout: 300             # claude reviewer wall cap (s); clamped to GATE_
 codex_timeout: 480              # codex reviewer wall cap (s); clamped to GATE_WALL_BUDGET (550)
 agy_timeout: 30                 # was 300 — deliberate for this repo (ADR-B03): agy is a BLOCK signal here
 require_primary_verdict: false  # true => an agy-fallback ALLOW is refused as INFRA_ERROR (ADR-G17)
+# locale: ko  # human-facing halt/release-halt text; default = defaults.yaml output_locale, else en (issue #7). Rerun sdp-anchor.sh after adding it
 # severity_verdict: true  # default; false (or an unparsable value) => a BLOCK always counts, even when every finding is advisory (issue #6)
 cadence:
   escalate_from: 6              # planner-solo hard-blocked from this cumulative BLOCK

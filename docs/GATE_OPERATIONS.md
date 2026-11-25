@@ -92,7 +92,7 @@ file operation, and the sanctioned paths for it are named in each row.
 | File | Means | What clears it |
 |---|---|---|
 | `…​.log` | The append-only record of record: `BLOCK_ATTEMPT`, `ALLOW`, `INFRA_ERROR`, `RESET`, `OVERRIDE`, `PIVOT_RESET`, `TEAM_REVIEW` / `TEAM_CARRY`, `ESCALATION_STALL`, `MARKER_AUDIT_FAILED`. | Nothing. It is never rewritten. |
-| `…​.halt` | The gate is **stuck** and refuses every review pre-provider. Written on an identical BLOCK reason twice, at `max_block`, at `max_stall` consecutive escalation stalls, and on a team `decision=halt`. | A human decision, applied through the attended override path or by the operator deliberately clearing the halt outside the tooling. There is no gate command that clears it. |
+| `…​.halt` | The gate is **stuck** and refuses every review pre-provider. Written on an identical BLOCK reason twice, at `max_block`, at `max_stall` consecutive escalation stalls, and on a team `decision=halt`. | A human decision: `release-halt` (issue #7, below), a split, or the attended override path. |
 | `…​.infra_flag` | The **toolchain** failed — a provider was unreachable, an audit row could not be written, or a marker could not be audited. Stage 8 refuses merge/push while it exists. | A clean content `ALLOW`, or the override path. |
 | `…​.needs_human` | **The gate refused to run a review and nobody has retried.** Written on the *first* escalation stall. This is not an infra failure: it means the artifact is owed a team review and a marker (continue/fix are agent-recorded; pivot/halt are a human's). | A review actually executing — L5's `ALLOW` and BLOCK arms — or the override path. An `INFRA_ERROR` deliberately does **not** clear it, because no review ran. |
 | `…​.residuals` | **A non-authoritative copy of the reviewer output behind the latest severity-derived ALLOW** (issue #6): a `BLOCK:` whose findings were all labelled `advisory`. It is untrusted reviewer text, 0600, behind a DATA banner, and the gate never reads it. The authoritative residuals are the gate result itself, which the author applies or waives in the artifact's `Residuals` section. `severity_verdict: false` in `gates.yaml` stops it being written. | Every other outcome on the key, and the override path, remove it (best effort). It may be stale; nothing depends on it. |
@@ -133,7 +133,7 @@ re-validates roster, outputs, freshness and cadence on the write. `--marker-deci
 stay human-only: a TTY, `SDP_MARKER_HUMAN` matching `~/.sdp/marker.token`,
 `--i-am-recording-a-state-changing-decision`, and a typed confirmation phrase.
 
-Provisioning the marker token (needed for `record-marker` pivot/halt and `record-split` only; the override path uses a separate token, `~/.sdp/override.token` matched by `SDP_GATE_OVERRIDE`, attended mode only, unchanged by ADR-M1) is a one-time operator step: write a non-empty value to
+Provisioning the marker token (needed for `record-marker` pivot/halt, `record-split` and `release-halt` only; the override path uses a separate token, `~/.sdp/override.token` matched by `SDP_GATE_OVERRIDE`, attended mode only, unchanged by ADR-M1) is a one-time operator step: write a non-empty value to
 `~/.sdp/marker.token`, `chmod 600` it, and export `SDP_MARKER_HUMAN` with the same value in the
 interactive shell. **The token is an intent signal, not a secret** — the file is same-uid
 readable, so anything that can run `cat` can supply it. The only affordance barrier is the TTY
@@ -142,6 +142,35 @@ succeed even under a pty.
 
 Running `record-marker` twice is safe and **the second marker wins**: both lines stay in the log
 as an audit trail, and only the last is consumed by the escalation check.
+
+## Releasing a halted artifact (issue #7)
+
+Every halt body ends with a `FOR THE HUMAN` section that carries these two commands with the
+paths filled in. The agent relays it; the human runs one in their own terminal:
+
+```
+SDP_MARKER_HUMAN="$(cat ~/.sdp/marker.token)" python3 scripts/review_gate.py --cwd <dir> \
+  release-halt <artifact> --i-am-recording-a-state-changing-decision            # reset + review again
+SDP_MARKER_HUMAN="$(cat ~/.sdp/marker.token)" python3 scripts/review_gate.py --cwd <dir> \
+  release-halt <artifact> --i-am-recording-a-state-changing-decision --accept   # accept as owner
+```
+
+The typed phrase is `release halt for <stem>` (or `accept <stem>`). The audit row (`RELEASE`,
+reason `release_halt mode=review|accept`) is written first; if it cannot be written nothing changes.
+Then the gate log gets `RESET <ts> RELEASE mode=review` (or `mode=accept sha=<artifact sha256>`) and
+`.halt`, `.needs_human` and `.residuals` are removed. `.infra_flag` is left for a clean ALLOW to
+clear. An accepted artifact's next gate call returns `ALLOW: accepted by owner (release-halt
+--accept); not reviewed` when the bytes still match, audited as `owner_accept`; an edit, a later
+BLOCK, ALLOW or reset retires the acceptance. Older engines read the line as a plain `RESET`.
+
+Unlike the override path it needs no `mode: attended` and does not touch `gates.yaml`, so there is
+no re-anchor. If `~/.sdp/marker.token` does not exist, the halt body adds a one-time step that
+creates it.
+
+**Locale.** The human section and the `release-halt` messages follow `locale: ko|en` in
+`gates.yaml`; without it, the anchor-selected `defaults.yaml` `output_locale` (`auto` follows
+`LC_ALL` / `LANG`); otherwise English. Agent-facing text is always English. Adding `locale:` to
+`gates.yaml` changes its digest, so rerun `sdp-anchor.sh` afterwards; `output_locale` needs nothing.
 
 ## Splitting a halted artifact
 

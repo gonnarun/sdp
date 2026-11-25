@@ -510,5 +510,124 @@ out="$(printf 'record split for plan into 2 at round 2\n' | \
   && ok "(K7) an append failure during seeding leaves the parent unsealed" \
   || bad "(K7) the parent closed despite a failed seed"
 
+# ---------------------------------------------------------------------------
+# M. release-halt (issue #7) -- the human's runnable release, and its guards
+# ---------------------------------------------------------------------------
+ACK=--i-am-recording-a-state-changing-decision
+export LANG=en_US.UTF-8; unset LC_ALL   # output_locale: auto follows these
+R="$(mkproj rel1)"
+out="$(H --cwd "$R" --reviewer claude review "$R/plan.md" 2>&1)"
+{ printf '%s' "$out" | grep -q 'FOR THE HUMAN' \
+  && printf '%s' "$out" | grep -q "release-halt '[^']*/rel1/plan.md' $ACK" \
+  && printf '%s' "$out" | grep -q -- "$ACK --accept" \
+  && printf '%s' "$out" | grep -q 'RELAY THE .FOR THE HUMAN. SECTION'; } \
+  && ok "(M1) the halt body carries the human section with both runnable commands" \
+  || bad "(M1) the halt body lacks the human release commands"
+printf '%s' "$out" | grep -q 'marker.token)' \
+  && ok "(M2) the command reads the token by reference, never by value" \
+  || bad "(M2) the command does not reference ~/.sdp/marker.token"
+printf '%s' "$out" | grep -q 'sekret' \
+  && bad "(M3) the token value leaked into the halt body" \
+  || ok "(M3) the token value never appears in the halt body"
+printf '%s' "$out" | grep -q 'One time only' \
+  && bad "(M4) token setup shown although the token exists" \
+  || ok "(M4) no token-setup step when the token exists"
+
+K="$(mkproj relko)"; printf 'locale: ko\n' >> "$K/.sdp/gates.yaml"
+out="$(H --cwd "$K" --reviewer claude review "$K/plan.md" 2>&1)"
+{ printf '%s' "$out" | grep -q '사람용 안내' && printf '%s' "$out" | grep -q 'HALT. This gate'; } \
+  && ok "(M5) locale: ko localizes the human section; the agent part stays English" \
+  || bad "(M5) locale: ko did not localize the human section"
+D="$(mkproj reldef)"; printf 'output_locale: ko\n' > "$D/.sdp/defaults.yaml"
+out="$(H --cwd "$D" --reviewer claude review "$D/plan.md" 2>&1)"
+printf '%s' "$out" | grep -q '사람용 안내' \
+  && ok "(M5b) without a gates locale, defaults.yaml output_locale: ko is followed" \
+  || bad "(M5b) output_locale: ko was not followed"
+out="$(printf 'release halt for plan\n' | RS --cwd "$K" release-halt "$K/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '게이트 상태를 바꾸는 명령'; } \
+  && ok "(M6) refusals are localized too" || bad "(M6) refusal not localized: $out"
+
+RLOG="$(logpath "$R" "$R/plan.md")"; RHALT="${RLOG%.log}.halt"
+out="$(printf 'release halt for plan\n' | RS_NOTTY --cwd "$R" release-halt "$R/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'TTY' && [ -f "$RHALT" ]; } \
+  && ok "(M7) release-halt refuses without a TTY" || bad "(M7) release-halt ran without a TTY"
+out="$(printf 'release halt for plan\n' | RS_NOTOKEN --cwd "$R" release-halt "$R/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'SDP_MARKER_HUMAN' && [ -f "$RHALT" ]; } \
+  && ok "(M8) release-halt refuses without the human token" || bad "(M8) ran with no token"
+out="$(printf 'release halt for plan\n' | RS --cwd "$R" release-halt "$R/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && [ -f "$RHALT" ]; } \
+  && ok "(M9) release-halt refuses without the acknowledgement flag" || bad "(M9) ran without the flag"
+out="$(printf 'nope\n' | RS --cwd "$R" release-halt "$R/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'mismatch' && [ -f "$RHALT" ]; } \
+  && ok "(M10) a wrong phrase changes nothing" || bad "(M10) wrong phrase accepted"
+out="$(H --cwd "$R" --reviewer claude review "$R/plan.md" --accept 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'only valid with release-halt'; } \
+  && ok "(M11) --accept is rejected outside release-halt" || bad "(M11) stray --accept accepted"
+
+out="$(printf 'release halt for plan\n' | RS --cwd "$R" release-halt "$R/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && [ ! -f "$RHALT" ] && grep -q '^RESET .* RELEASE mode=review$' "$RLOG"; } \
+  && ok "(M12) release-halt clears the halt and writes RESET ... RELEASE mode=review" \
+  || bad "(M12) release failed: $out"
+set_claude_verdict "ALLOW: fine now"
+out="$(H --cwd "$R" --reviewer claude review "$R/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW: fine now'; } \
+  && ok "(M13) after a release the next gate call is a real review" || bad "(M13) no real review: $out"
+out="$(printf 'release halt for plan\n' | RS --cwd "$R" release-halt "$R/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'not halted'; } \
+  && ok "(M14) release-halt refuses on an artifact that is not halted" || bad "(M14) released a live gate"
+
+A2="$(mkproj rel2)"; A2LOG="$(logpath "$A2" "$A2/plan.md")"
+H --cwd "$A2" --reviewer claude review "$A2/plan.md" >/dev/null 2>&1
+out="$(printf 'accept plan\n' | RS --cwd "$A2" release-halt "$A2/plan.md" $ACK --accept 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && grep -Eq '^RESET .* RELEASE mode=accept sha=[0-9a-f]{64}$' "$A2LOG"; } \
+  && ok "(M15) --accept binds the acceptance to the artifact sha256" || bad "(M15) accept failed: $out"
+set_claude_verdict "BLOCK: would block if asked"
+out="$(H --cwd "$A2" --reviewer claude review "$A2/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW: accepted by owner' \
+  && tail -1 "$A2/.private/sdp-artifacts/gate-audit.ndjson" | grep -q '"owner_accept"'; } \
+  && ok "(M16) the accepted bytes pass without a review, audited as owner_accept" \
+  || bad "(M16) accepted artifact was not passed: $out"
+out="$(H --cwd "$A2" --reviewer claude review "$A2/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '^BLOCK: would block'; } \
+  && ok "(M17) one acceptance is consumed by one ALLOW" || bad "(M17) acceptance reused: $out"
+
+A3="$(mkproj rel3)"
+H --cwd "$A3" --reviewer claude review "$A3/plan.md" >/dev/null 2>&1
+printf 'accept plan\n' | RS --cwd "$A3" release-halt "$A3/plan.md" $ACK --accept >/dev/null 2>&1
+printf 'edited\n' >> "$A3/plan.md"
+set_claude_verdict "BLOCK: would block if asked"
+out="$(H --cwd "$A3" --reviewer claude review "$A3/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '^BLOCK: would block'; } \
+  && ok "(M18) editing the file after --accept cancels the acceptance" || bad "(M18) edited file passed: $out"
+
+A4="$(mkproj rel4)"; A4LOG="$(logpath "$A4" "$A4/plan.md")"; A4HALT="${A4LOG%.log}.halt"
+H --cwd "$A4" --reviewer claude review "$A4/plan.md" >/dev/null 2>&1
+rm -f "$A4/.private/sdp-artifacts/gate-audit.ndjson"
+mkdir -p "$A4/.private/sdp-artifacts/gate-audit.ndjson"
+out="$(printf 'release halt for plan\n' | RS --cwd "$A4" release-halt "$A4/plan.md" $ACK 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && [ -f "$A4HALT" ] && ! grep -q 'RELEASE' "$A4LOG"; } \
+  && ok "(M19) an unauditable release changes nothing" || bad "(M19) unaudited release applied: $out"
+
+# codex review of issue #7: both failure paths must not report success.
+A5="$(mkproj rel5)"; A5LOG="$(logpath "$A5" "$A5/plan.md")"
+H --cwd "$A5" --reviewer claude review "$A5/plan.md" >/dev/null 2>&1
+printf 'accept plan\n' | RS --cwd "$A5" release-halt "$A5/plan.md" $ACK --accept >/dev/null 2>&1
+set_claude_verdict "BLOCK: would block if asked"
+out="$(python3 "$HARNESS" --binary-resolver "$RES" --passwd-home "$HOMEFIX" --append-fail-after 0 -- \
+        --cwd "$A5" --reviewer claude review "$A5/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'INFRA_ERROR' && ! printf '%s' "$out" | grep -q '^ALLOW'; } \
+  && ok "(M20) an unconsumable acceptance is INFRA_ERROR, not a silent ALLOW" || bad "(M20) $out"
+out="$(H --cwd "$A5" --reviewer claude review "$A5/plan.md" 2>&1)"; rc=$?
+{ [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^ALLOW: accepted by owner'; } \
+  && ok "(M21) the acceptance survives the failed attempt and is consumed once later" || bad "(M21) $out"
+
+A6="$(mkproj rel6)"; A6LOG="$(logpath "$A6" "$A6/plan.md")"; A6DIR="$(dirname "$A6LOG")"
+H --cwd "$A6" --reviewer claude review "$A6/plan.md" >/dev/null 2>&1
+chmod 555 "$A6DIR"
+out="$(printf 'release halt for plan\n' | RS --cwd "$A6" release-halt "$A6/plan.md" $ACK 2>&1)"; rc=$?
+chmod 755 "$A6DIR"
+{ [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'could not be removed'; } \
+  && ok "(M22) a .halt that cannot be removed is reported, not claimed released" || bad "(M22) rc=$rc $out"
+
 echo "-------- $PASS passed, $FAIL failed --------"
 [ "$FAIL" -eq 0 ]

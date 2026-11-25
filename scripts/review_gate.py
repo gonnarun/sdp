@@ -1449,6 +1449,39 @@ def _gate_mode(cfg: dict[str, str]) -> str:
     return "attended" if cfg.get("mode", "unattended") == "attended" else "unattended"
 
 
+def _gate_locale(cfg: dict, root: Path | None = None) -> str:
+    """Issue #7: the locale of the HUMAN-facing halt / release-halt text.
+
+    Agent-facing text stays English. Order: `locale: ko|en` in gates.yaml; else the
+    project's `output_locale` in the anchor-selected defaults.yaml (the switch
+    sdp-anchor.sh already resolves, so most projects need no new key -- and
+    defaults.yaml is not in the gates provenance digest, so no re-anchor); `auto`
+    follows LC_ALL / LANG as the anchor does. Best effort: any failure -> en, never
+    an INFRA_ERROR.
+    """
+    explicit = str(cfg.get("locale") or "").strip().lower()
+    if explicit in ("ko", "en"):
+        return explicit
+    if root is None:
+        return "en"
+    try:
+        selected = config_discovery.discover(
+            root, "defaults.yaml", home_resolver=lambda: Path(_passwd_home())
+        )
+        value = ""
+        if selected is not None:
+            for raw in selected.text.splitlines():
+                line = _strip_comment(raw)
+                if line.startswith("output_locale:"):
+                    value = line.partition(":")[2].strip().strip('"').strip("'").lower()
+                    break
+        if value in ("", "auto"):
+            value = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").lower()
+        return "ko" if value.startswith("ko") else "en"
+    except Exception:  # noqa: BLE001 - a display preference must never fail the gate
+        return "en"
+
+
 # ------------------------------------------------------------------ state layer
 def _audit_base(root: Path) -> Path:
     # Whatever branch produces it, this directory holds the gate log, the state lock,
@@ -1646,6 +1679,26 @@ class _LogState:
     # NOT tolerated residue. The flag makes such a log count as carrying state, so a
     # stray or mismatched retraction can never make an artifact look fresh.
     split_residue_bad: bool = False
+    # Issue #7. The artifact sha256 a human accepted with `release-halt --accept`,
+    # carried on that RESET line. The next gate call on byte-identical content
+    # returns ALLOW without a review; any later BLOCK_ATTEMPT, ALLOW, reset or
+    # malformed line retires it, and an edited artifact simply does not match.
+    accept_sha: str = ""
+
+
+_ACCEPT_SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _release_accept_sha(parts: list[str]) -> str:
+    # `RESET <ts> RELEASE mode=accept sha=<hex>` -- older engines key on parts[0]
+    # only, so to them this is a plain RESET (issue #7: mixed-version safe).
+    if len(parts) < 3 or parts[2] != "RELEASE":
+        return ""
+    fields = dict(tok.split("=", 1) for tok in parts[3:] if "=" in tok)
+    sha = fields.get("sha", "")
+    if fields.get("mode") == "accept" and _ACCEPT_SHA_RE.fullmatch(sha):
+        return sha
+    return ""
 
 
 def _parse_log(log: Path) -> _LogState:
@@ -1671,6 +1724,7 @@ def _parse_log(log: Path) -> _LogState:
     split_residue_bad = False
     split_seed: tuple[str, str] = ("", "")
     reason_hashes: set[str] = set()
+    accept_sha = ""
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -1685,7 +1739,9 @@ def _parse_log(log: Path) -> _LogState:
             blocks_since_marker = 0
             stall_run = 0
             stall_trailing = False
+            accept_sha = _release_accept_sha(parts) if head == "RESET" else ""
         elif head == "PIVOT_RESET":
+            accept_sha = ""
             count = 0
             hashes = []
             reason_hashes = set()
@@ -1695,6 +1751,7 @@ def _parse_log(log: Path) -> _LogState:
             stall_run = 0
             stall_trailing = False
         elif head == "BLOCK_ATTEMPT":
+            accept_sha = ""
             count += 1
             hashes.append(parts[3] if len(parts) > 3 else "")
             if len(parts) > 3 and parts[3]:
@@ -1792,9 +1849,11 @@ def _parse_log(log: Path) -> _LogState:
             # counter-neutral, so re-admitting it would restore a counter-neutral
             # reset primitive. Two notions, two fields (ADR-G04).
             stall_trailing = False
+            accept_sha = ""   # issue #7: an acceptance is consumed by one ALLOW
         elif head == "INFRA_ERROR":
             pass
         else:
+            accept_sha = ""
             count += 1   # malformed -> toward the halt (never away); carries no reason
             # TOTALITY (codex review, HIGH-2): `count` is what moves `prior`, and
             # `prior` is what moves the window anchor -- so every branch that
@@ -1806,7 +1865,7 @@ def _parse_log(log: Path) -> _LogState:
     return _LogState(count, hashes[-2:], last_marker, last_block_ts, pivot_count,
                      stall_run, stall_trailing, blocks_since_marker,
                      split_closed, split_depth, len(reason_hashes), split_pending,
-                     split_residue_bad)
+                     split_residue_bad, accept_sha)
 
 
 def _ts_to_epoch(ts: str) -> float:
@@ -2297,16 +2356,96 @@ def _split_command_hint(root: Path, artifact: Path) -> str:
     )
 
 
-def _halt_guidance(root: Path, artifact: Path, prior: int | None, state: "_LogState | None") -> str:
-    """The paragraph every halt carries (issue #4 request 1).
+RELEASE_ACCEPT_FLAG = "--accept"
 
-    A halt used to return one line with an empty body. An agent that is told only
-    that it lost, with no sanctioned move, fills the gap itself -- and the moves it
-    invents are the human-only ones (delete `.halt`, zero the counter, set
-    `SDP_GATE_OVERRIDE`), which it then offers the user as choices. Naming the one
-    thing the agent may do, and naming the levers it may NOT propose, is what closes
-    that. Downstream repositories were each writing this paragraph into their own
-    project rules; it belongs in the engine that knows the state.
+
+def _release_command(root: Path, artifact: Path, accept: bool) -> str:
+    # Issue #7. One directly runnable line, pinned to THIS engine. Unlike the
+    # record-split command it IS shown on the halt body: the human has no other place
+    # to get it, and running it from an agent context is refused by the engine
+    # itself (no TTY, no human token) -- the guard that actually holds.
+    words = [
+        'SDP_MARKER_HUMAN="$(cat ~/.sdp/marker.token)"',
+        _shq(sys.executable), _shq(str(Path(__file__).resolve())),
+        "--cwd", _shq(str(root)), "release-halt", _shq(str(artifact)), CONFIRM_FLAG,
+    ]
+    if accept:
+        words.append(RELEASE_ACCEPT_FLAG)
+    return " ".join(words)
+
+
+def _marker_token_present() -> bool:
+    # Existence only -- the value is never read here.
+    try:
+        return (Path(_passwd_home()) / ".sdp" / "marker.token").is_file()
+    except OSError:
+        return False
+
+
+_TOKEN_SETUP = "mkdir -p ~/.sdp && (umask 077 && openssl rand -hex 16 > ~/.sdp/marker.token)"
+
+
+def _human_release_section(root: Path, artifact: Path, prior: int | None, locale: str) -> list[str]:
+    review_cmd = _release_command(root, artifact, accept=False)
+    accept_cmd = _release_command(root, artifact, accept=True)
+    count = "?" if prior is None else str(prior)
+    token = _marker_token_present()
+    if locale == "ko":
+        lines = [
+            "=== 사람용 안내 (에이전트는 이 섹션을 그대로 전달할 것) ===",
+            f"리뷰 게이트가 {artifact.name} 에서 멈췄다 (누적 BLOCK {count}회).",
+            "에이전트가 아니라 사람이 직접 자기 터미널에서 아래 중 하나를 실행한다.",
+        ]
+        if not token:
+            lines += ["", "0) 최초 1회: 사람 확인용 토큰 만들기", f"   {_TOKEN_SETUP}"]
+        lines += [
+            "",
+            "1) 리셋 후 다시 리뷰 (카운터 0부터, 산출물은 다시 리뷰받는다):",
+            f"   {review_cmd}",
+            "",
+            "2) 현재 판본을 owner 로 수용 (다음 게이트 호출이 리뷰 없이 ALLOW, 파일을 고치면 수용 취소):",
+            f"   {accept_cmd}",
+            "",
+            "명령이 확인 문구 입력을 요구한다. 화면에 나온 문구를 그대로 입력한다.",
+            "끝나면 에이전트에게 \"게이트 다시 실행해\" 라고 말한다.",
+        ]
+    else:
+        lines = [
+            "=== FOR THE HUMAN (the agent relays this section verbatim) ===",
+            f"The review gate stopped on {artifact.name} after {count} cumulative BLOCKs.",
+            "Run ONE of the following yourself, in your own terminal -- not through the agent.",
+        ]
+        if not token:
+            lines += ["", "0) One time only: create the human-intent token", f"   {_TOKEN_SETUP}"]
+        lines += [
+            "",
+            "1) Reset and review again (the counter restarts at 0; the artifact is reviewed again):",
+            f"   {review_cmd}",
+            "",
+            "2) Accept this exact version as owner (the next gate call returns ALLOW without a",
+            "   review; any edit to the file cancels the acceptance):",
+            f"   {accept_cmd}",
+            "",
+            "The command asks you to type a confirmation phrase; type it exactly as shown.",
+            "Then tell the agent to run the gate again.",
+        ]
+    return lines
+
+
+def _halt_guidance(
+    root: Path, artifact: Path, prior: int | None, state: "_LogState | None",
+    locale: str = "en",
+) -> str:
+    """The paragraph every halt carries (issues #4 and #7).
+
+    Issue #4: a halt used to return one line with an empty body, and an agent with
+    no sanctioned move invented the human-only ones (delete `.halt`, zero the
+    counter, set `SDP_GATE_OVERRIDE`) and offered them as choices.
+
+    Issue #7: fencing those off left the HUMAN with no runnable command either -- the
+    agent correctly refused to compose one, and the notice was English only. The
+    body now carries a section for the human with the exact `release-halt`
+    commands, which the agent relays verbatim and cannot run itself (TTY + token).
     """
     lines = [
         "",
@@ -2317,18 +2456,25 @@ def _halt_guidance(root: Path, artifact: Path, prior: int | None, state: "_LogSt
         "  BLOCK count; the gist of the last finding; what you resolved and what you did",
         "  not. Then stop. Do not retry the gate: after a halt every retry returns this",
         "  same line without reviewing anything.",
+    ]
+    split_closed = state is not None and state.split_closed
+    if not split_closed:
+        lines += [
+            "  RELAY THE 'FOR THE HUMAN' SECTION BELOW TO THE USER VERBATIM, commands",
+            "  included. Do not run those commands yourself: they refuse without a",
+            "  terminal and a human token.",
+        ]
+    lines += [
         "",
-        "HUMAN-ONLY LEVERS -- DO NOT PROPOSE THESE AND DO NOT USE THEM:",
-        "  RESET / OVERRIDE / PIVOT_RESET log lines, and SDP_GATE_OVERRIDE. Each needs a",
-        "  terminal, a human-provisioned token, and for a state-changing decision a typed",
-        "  confirmation. They exist for the human at the keyboard, not as options to put",
-        "  to the user. There is also no gate command that deletes the halt flag; the",
-        "  gate state files are not yours to edit.",
+        "OTHER LEVERS -- DO NOT PROPOSE THESE AND DO NOT USE THEM:",
+        "  RESET / OVERRIDE / PIVOT_RESET log lines, and SDP_GATE_OVERRIDE. Do not edit",
+        "  or delete gate state files. `release-halt`, shown below, is the only release",
+        "  path you relay.",
         "",
         "TEAM MARKERS ARE NOT CONSULTED AFTER A HALT. The halt is decided before the",
         "  marker anchor is computed, so preparing or recording one now changes nothing.",
     ]
-    if state is not None and state.split_closed:
+    if split_closed:
         lines += [
             "",
             "THIS ARTIFACT WAS SPLIT. Its scope now lives in the children named on the",
@@ -2337,17 +2483,18 @@ def _halt_guidance(root: Path, artifact: Path, prior: int | None, state: "_LogSt
     else:
         lines += [
             "",
-            "THE ONE WAY FORWARD, when the artifact is too broad to converge (each round",
-            "  raises a different defect rather than the same one): SPLIT it into narrower",
-            "  artifacts. That is a recorded, human-approved path -- not a reset. The",
-            "  parent is closed as SPLIT, each child starts its own counter, and the",
-            "  parent's halt history is linked from the child's log. You may PREPARE the",
-            "  request; a human records it at a terminal:",
+            "WHEN THE ARTIFACT IS TOO BROAD TO CONVERGE (each round raises a different",
+            "  defect rather than the same one), splitting it into narrower artifacts is",
+            "  the other recorded path. The parent is closed as SPLIT, each child starts",
+            "  its own counter, and the parent's halt history is linked from the child's",
+            "  log. You may PREPARE the request; a human records it at a terminal:",
             f"    {_split_command_hint(root, artifact)}",
             "  prepare-split writes a request file for the human and touches no gate state.",
         ]
     if prior is not None:
         lines += ["", f"Cumulative BLOCK attempts on this artifact: {prior}."]
+    if not split_closed:
+        lines += [""] + _human_release_section(root, artifact, prior, locale)
     return "\n".join(lines)
 
 
@@ -2398,6 +2545,7 @@ def run_review(
         severity_verdict = _severity_verdict_enabled(cfg.get("severity_verdict"))
         review_on = "odd" if (cfg.get("cadence.review_on") or "").strip().lower() == "odd" else "even"
         mode = _gate_mode(cfg)
+        locale = _gate_locale(cfg, root)   # issue #7: human-facing halt text only
         # ADR-004 D2 table: model + timeouts come from gates.yaml, never env.
         # Timeouts are clamped to GATE_WALL_BUDGET (ADR-008 _posint clamp).
         raw_model = (cfg.get("model") or "").strip()
@@ -2523,7 +2671,7 @@ def run_review(
             result = {
                 "verdict": "BLOCK", "provider": "none",
                 "line": line,
-                "output": _halt_guidance(root, artifact, halted_round, halted_state),
+                "output": _halt_guidance(root, artifact, halted_round, halted_state, locale),
                 "reason": "split_closed" if (halted_state and halted_state.split_closed) else "halt",
                 "exit_code": 1, "timeout": False, "round": halted_round,
             }
@@ -2531,6 +2679,29 @@ def run_review(
             return result
         state = _parse_log(paths["log"])
         prior = state.count
+        # -- issue #7: a human `release-halt --accept` of THESE exact bytes ---------
+        # The acceptance rides on the RESET line release-halt wrote and is bound to
+        # the artifact sha256, so an edit after the acceptance falls through to a
+        # normal review. It is consumed by the ALLOW line appended here.
+        if state.accept_sha and state.accept_sha == fingerprint.get("artifact_sha256"):
+            # The ALLOW line is what CONSUMES the acceptance; if it cannot be written
+            # the acceptance would pass every later call unreviewed (codex review F1).
+            if not _APPEND_LINE(paths["log"], f"ALLOW {_now_z()}"):
+                raise InfraError("owner-accept ALLOW append failed; acceptance not consumed")
+            _clear(paths["infra_flag"])
+            _clear(paths["needs_human"])
+            _clear(paths["residuals"])
+            result = {
+                "verdict": "ALLOW", "provider": "human",
+                "line": "ALLOW: accepted by owner (release-halt --accept); not reviewed",
+                "output": "", "reason": "owner_accept", "exit_code": 0,
+                "timeout": False, "round": prior,
+            }
+            if not _record(audit_base, artifact, key, prior, result, config_source, fingerprint):
+                if not _write_flag(paths["infra_flag"], "unauditable ALLOW (owner accept)\n"):
+                    raise InfraError("infra_flag write failed")
+                return _unauditable_allow(result)
+            return result
         # -- stuck: identical BLOCK first-line twice in a row -> halt (codex:329) --
         h = state.last_two_hashes
         if len(h) >= 2 and h[-1] and h[-1] == h[-2]:
@@ -2539,7 +2710,7 @@ def run_review(
             result = {
                 "verdict": "BLOCK", "provider": "none",
                 "line": "BLOCK: identical BLOCK reason twice in a row; gate halted",
-                "output": _halt_guidance(root, artifact, prior, state),
+                "output": _halt_guidance(root, artifact, prior, state, locale),
                 "reason": "stuck", "exit_code": 1, "timeout": False, "round": prior,
             }
             _record(audit_base, artifact, key, prior, result, config_source)
@@ -2551,7 +2722,7 @@ def run_review(
             result = {
                 "verdict": "BLOCK", "provider": "none",
                 "line": f"BLOCK: max_block {max_block} reached; gate halted",
-                "output": _halt_guidance(root, artifact, prior, state),
+                "output": _halt_guidance(root, artifact, prior, state, locale),
                 "reason": "max_block", "exit_code": 1, "timeout": False, "round": prior,
             }
             _record(audit_base, artifact, key, prior, result, config_source)
@@ -2582,7 +2753,7 @@ def run_review(
                     result = {
                         "verdict": "BLOCK", "provider": "none",
                         "line": f"BLOCK: escalation stalled {run} times; gate halted",
-                        "output": _halt_guidance(root, artifact, prior, state),
+                        "output": _halt_guidance(root, artifact, prior, state, locale),
                         "reason": f"escalation_stall_halt: {slug}",
                         "exit_code": 1, "timeout": False, "round": prior,
                     }
@@ -2614,7 +2785,7 @@ def run_review(
                 result = {
                     "verdict": "BLOCK", "provider": "none",
                     "line": f"BLOCK: team decision=halt at round {prior}; gate halted",
-                    "output": _halt_guidance(root, artifact, prior, state),
+                    "output": _halt_guidance(root, artifact, prior, state, locale),
                     "reason": "team_halt", "exit_code": 1, "timeout": False,
                     "round": prior,
                 }
@@ -3554,6 +3725,131 @@ def record_split(
         raise failure
 
 
+_RELEASE_TEXT = {
+    "en": {
+        "no_tty": "release-halt requires a terminal (stdin is not a TTY); nothing was written",
+        "no_token": "release-halt requires SDP_MARKER_HUMAN to match ~/.sdp/marker.token; "
+                    "nothing was written",
+        "no_ack": f"release-halt changes gate state; re-run with {CONFIRM_FLAG}; nothing was written",
+        "type": "Type exactly:",
+        "mismatch": "confirmation phrase mismatch; nothing was written",
+        "inflight": "a review is in flight for this artifact; retry when it finishes",
+        "split": "this artifact was split; gate its children instead; nothing was written",
+        "not_halted": "this artifact is not halted; nothing was written",
+        "audit": "audit row could not be written; nothing was changed",
+        "done_review": "RELEASED: {name} -- counter reset to 0; the next gate call reviews it again",
+        "done_accept": "RELEASED: {name} -- accepted as owner; the next gate call on this exact "
+                       "file returns ALLOW (editing the file cancels the acceptance)",
+        "next": "Tell the agent to run the gate again.",
+    },
+    "ko": {
+        "no_tty": "release-halt 는 사람이 직접 터미널에서 실행해야 한다 (TTY 아님). 아무것도 바꾸지 않았다",
+        "no_token": "SDP_MARKER_HUMAN 이 ~/.sdp/marker.token 과 다르다. 아무것도 바꾸지 않았다",
+        "no_ack": f"게이트 상태를 바꾸는 명령이다. {CONFIRM_FLAG} 를 붙여 다시 실행. 아무것도 바꾸지 않았다",
+        "type": "다음 문구를 그대로 입력:",
+        "mismatch": "확인 문구가 다르다. 아무것도 바꾸지 않았다",
+        "inflight": "이 산출물의 리뷰가 진행 중이다. 끝난 뒤 다시 실행",
+        "split": "이 산출물은 분할(split)됐다. 자식 산출물을 게이트에 올려라. 아무것도 바꾸지 않았다",
+        "not_halted": "이 산출물은 halt 상태가 아니다. 아무것도 바꾸지 않았다",
+        "audit": "감사 기록을 쓰지 못했다. 아무것도 바꾸지 않았다",
+        "done_review": "해제됨: {name} -- 카운터 0으로 리셋. 다음 게이트 호출에서 다시 리뷰한다",
+        "done_accept": "해제됨: {name} -- owner 수용. 이 파일 그대로면 다음 게이트 호출이 ALLOW 다 "
+                       "(파일을 고치면 수용 취소)",
+        "next": "에이전트에게 \"게이트 다시 실행해\" 라고 말한다.",
+    },
+}
+
+
+def release_halt(
+    artifact_path: str,
+    cwd: str | None = None,
+    *,
+    accept: bool = False,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Issue #7: the human's release of a halted artifact.
+
+    Same ceremony as record-split: a TTY, SDP_MARKER_HUMAN matching
+    ~/.sdp/marker.token, the confirm flag and a typed phrase. It never touches
+    gates.yaml, so it needs no re-anchor (the override path does).
+
+    Default: append `RESET <ts> RELEASE mode=review` and clear .halt / .needs_human
+    / .residuals -- the counter restarts and the next gate call reviews again.
+    --accept: the RESET line also carries the artifact sha256; the next gate call on
+    those exact bytes returns ALLOW (reason owner_accept) without a review.
+    pivot_count and split_depth are lifetime fields and are untouched. The audit row
+    is written FIRST: a failed audit changes nothing.
+    """
+    import time
+
+    def _refuse(msg: str, verdict: str = "BLOCK") -> dict[str, Any]:
+        return {
+            "verdict": verdict, "provider": "human", "line": f"BLOCK: {msg}",
+            "output": "", "reason": msg, "exit_code": 1, "timeout": False, "round": None,
+        }
+
+    root, artifact, key, paths, _depth_cap, config_source = _split_context(artifact_path, cwd)
+    cfg, _ = _read_gates_yaml(root)
+    text = _RELEASE_TEXT[_gate_locale(cfg, root)]
+    if not _ISATTY(0):
+        return _refuse(text["no_tty"])
+    if not _marker_token_ok():
+        return _refuse(text["no_token"])
+    if not confirmed:
+        return _refuse(text["no_ack"])
+    audit_base = _audit_base(root)
+    mode = "accept" if accept else "review"
+    expected = f"{'accept' if accept else 'release halt for'} {artifact.stem}"
+    print(f"{text['type']}  {expected}")
+    try:
+        typed = input().strip()
+    except EOFError:
+        typed = ""
+    if typed != expected:   # exact after strip, case-sensitive, ONE attempt
+        return _refuse(text["mismatch"])
+
+    if _inflight_active(paths["inflight"]):
+        return _refuse(text["inflight"])
+    with _state_lock(paths["lock"], time.monotonic() + 30):
+        if _inflight_active(paths["inflight"]):
+            return _refuse(text["inflight"])
+        state = _parse_log(paths["log"])
+        if state.split_closed:
+            return _refuse(text["split"])
+        if not paths["halt"].exists():
+            return _refuse(text["not_halted"])
+        prior = state.count
+        line = f"RESET {_now_z()} RELEASE mode={mode}"
+        fingerprint = None
+        if accept:
+            _text, fingerprint = _read_artifact(artifact, DEFAULT_MAX_ARTIFACT_BYTES)
+            line += f" sha={fingerprint['artifact_sha256']}"
+        result = {
+            "verdict": "RELEASE", "provider": "human",
+            "line": (text["done_accept"] if accept else text["done_review"]).format(name=artifact.name),
+            "output": text["next"], "reason": f"release_halt mode={mode}",
+            "exit_code": 0, "timeout": False, "round": prior,
+        }
+        if not _record(audit_base, artifact, key, prior, result, config_source, fingerprint):
+            return _refuse(text["audit"], verdict="INFRA_ERROR")
+        if not _APPEND_LINE(paths["log"], line):
+            raise InfraError("RESET RELEASE append failed; the halt is unchanged")
+        # Checked, unlike _clear (codex review F2): a .halt that survives would make
+        # a reported success a lie -- every later gate call would still BLOCK.
+        try:
+            paths["halt"].unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise InfraError(
+                f"RESET RELEASE written but .halt could not be removed ({exc}); "
+                "fix the gate directory permissions and run release-halt again"
+            ) from exc
+        _clear(paths["needs_human"])
+        _clear(paths["residuals"])
+        return result
+
+
 _SPLIT_SEED_HEADS = frozenset({"SPLIT_CHILD_OF", "SPLIT_CHILD_ABANDONED",
                                SPLIT_RATIONALE_PREFIX.strip()})
 
@@ -3912,7 +4208,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--marker-{_field}", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         CONFIRM_FLAG, dest="state_change_ack", action="store_true",
-        help="Required for --marker-decision pivot|halt and for record-split, "
+        help="Required for --marker-decision pivot|halt, record-split and release-halt, "
              "alongside a typed confirmation.",
     )
     # ADR-G20 (issue #4): the halt-recovery split. Repeatable child paths, one
@@ -3925,6 +4221,11 @@ def main(argv: list[str] | None = None) -> int:
         "--split-rationale", dest="split_rationale", default="", metavar="TEXT",
         help="Why the parent's scope cannot converge (recorded in the gate log).",
     )
+    # Issue #7: the human's halt release. Valid ONLY with release-halt.
+    parser.add_argument(
+        RELEASE_ACCEPT_FLAG, dest="release_accept", action="store_true",
+        help="release-halt only: accept this exact artifact as owner instead of re-review.",
+    )
     parser.add_argument("prompt", nargs="?", help="Review prompt or @prompt-file")
     parser.add_argument("artifact", nargs="?", help="Artifact path inside cwd")
     args = parser.parse_args(argv)
@@ -3932,6 +4233,7 @@ def main(argv: list[str] | None = None) -> int:
     marker_fields = {f: getattr(args, f"marker_{f}") or "" for f in MARKER_FIELDS}
     split_flags_used = bool(args.split_child) or bool(args.split_rationale)
     split_verb = args.prompt in ("prepare-split", "record-split")
+    release_verb = args.prompt == "release-halt"
     marker_verb = args.prompt in ("prepare-marker", "record-marker")
     marker_flags_used = (
         args.marker_decision != "continue"
@@ -3939,7 +4241,7 @@ def main(argv: list[str] | None = None) -> int:
         # CONFIRM_FLAG is shared with record-split, so it only counts as a marker
         # flag when the verb is not a split one -- otherwise the split ceremony's
         # own acknowledgement would be rejected as a stray marker flag.
-        or (args.state_change_ack and not split_verb)
+        or (args.state_change_ack and not split_verb and not release_verb)
     )
     if marker_flags_used and not marker_verb:
         # §4.5 Q19: REJECTED, not ignored. Silent acceptance is how a
@@ -3949,6 +4251,27 @@ def main(argv: list[str] | None = None) -> int:
     if split_flags_used and not split_verb:
         print("BLOCK: --split-* flags are only valid with prepare-split or record-split")
         return 1
+    if args.release_accept and not release_verb:
+        print(f"BLOCK: {RELEASE_ACCEPT_FLAG} is only valid with release-halt")
+        return 1
+
+    if release_verb:
+        if not args.artifact:
+            print(f"BLOCK: usage: review_gate.py [--cwd DIR] release-halt <artifact-path> "
+                  f"{CONFIRM_FLAG} [{RELEASE_ACCEPT_FLAG}]")
+            return 1
+        try:
+            result = release_halt(
+                args.artifact, args.cwd,
+                accept=args.release_accept, confirmed=args.state_change_ack,
+            )
+        except Exception as exc:  # noqa: BLE001 - the CLI must fail closed.
+            print(f"BLOCK: INFRA_ERROR ({exc})")
+            return 1
+        print(result["line"])
+        if result.get("output"):
+            print(result["output"])
+        return 0 if result.get("exit_code") == 0 else 1
 
     if args.prompt in ("prepare-marker", "record-marker"):
         if not args.artifact:

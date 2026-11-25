@@ -157,8 +157,9 @@ def _tools() -> list[dict[str, Any]]:
                 "terminal via `review_gate.py record-split`, which refuses without a TTY, a "
                 "human-provisioned token and a typed confirmation. Splitting closes the parent "
                 "and starts each child at round 0, so it is NOT a counter reset you may take "
-                "yourself -- and the human-only levers (RESET/OVERRIDE/PIVOT_RESET, "
-                "SDP_GATE_OVERRIDE) are never yours to propose."
+                "yourself. The halt body's FOR THE HUMAN section (the human's release-halt "
+                "commands) is relayed verbatim, never run; the other levers "
+                "(RESET/OVERRIDE/PIVOT_RESET, SDP_GATE_OVERRIDE) are never yours to propose."
             ),
             "inputSchema": {
                 "type": "object",
