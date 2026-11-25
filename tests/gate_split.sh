@@ -514,7 +514,6 @@ out="$(printf 'record split for plan into 2 at round 2\n' | \
 # M. release-halt (issue #7) -- the human's runnable release, and its guards
 # ---------------------------------------------------------------------------
 ACK=--i-am-recording-a-state-changing-decision
-export LANG=en_US.UTF-8; unset LC_ALL   # output_locale: auto follows these
 R="$(mkproj rel1)"
 out="$(H --cwd "$R" --reviewer claude review "$R/plan.md" 2>&1)"
 { printf '%s' "$out" | grep -q 'FOR THE HUMAN' \

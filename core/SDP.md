@@ -291,7 +291,7 @@ A halt is not a verdict you can retry past: every later review returns the same 
 - **default** — appends `RESET <ts> RELEASE mode=review` and clears `.halt`: the counter restarts at 0 and the next gate call reviews the artifact again;
 - **`--accept`** — the owner accepts this exact version: the `RESET` line also carries the artifact sha256, and the next gate call on those bytes returns `ALLOW: accepted by owner` without a review (audit reason `owner_accept`). Any edit to the file cancels the acceptance, and one acceptance is consumed by one ALLOW.
 
-It refuses on an artifact that is not halted or was split. The human-facing text follows `locale: ko|en` in `gates.yaml`, else the anchor-selected `output_locale` (`auto` follows `LC_ALL`/`LANG`), else English; agent-facing text stays English.
+It refuses on an artifact that is not halted or was split. The human-facing text follows `locale: ko|en` in `gates.yaml`, else the anchor-selected `output_locale` when it names `ko` (`auto` counts as English: the gate reads no environment variables), else English; agent-facing text stays English.
 
 ### Splitting a halted artifact (the sanctioned recovery)
 A halt usually means the artifact's **scope** was too broad: every round raises a *different* defect, and fixing one exposes the next. Continuing to patch one over-broad artifact does not converge. The sanctioned way forward is to **split it into narrower artifacts**, recorded by a human:

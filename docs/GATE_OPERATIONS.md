@@ -168,8 +168,8 @@ no re-anchor. If `~/.sdp/marker.token` does not exist, the halt body adds a one-
 creates it.
 
 **Locale.** The human section and the `release-halt` messages follow `locale: ko|en` in
-`gates.yaml`; without it, the anchor-selected `defaults.yaml` `output_locale` (`auto` follows
-`LC_ALL` / `LANG`); otherwise English. Agent-facing text is always English. Adding `locale:` to
+`gates.yaml`; without it, the anchor-selected `defaults.yaml` `output_locale` when it names `ko`
+(`auto` counts as English, because the gate reads no environment variables); otherwise English. Agent-facing text is always English. Adding `locale:` to
 `gates.yaml` changes its digest, so rerun `sdp-anchor.sh` afterwards; `output_locale` needs nothing.
 
 ## Splitting a halted artifact

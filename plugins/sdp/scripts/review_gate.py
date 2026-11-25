@@ -1455,9 +1455,9 @@ def _gate_locale(cfg: dict, root: Path | None = None) -> str:
     Agent-facing text stays English. Order: `locale: ko|en` in gates.yaml; else the
     project's `output_locale` in the anchor-selected defaults.yaml (the switch
     sdp-anchor.sh already resolves, so most projects need no new key -- and
-    defaults.yaml is not in the gates provenance digest, so no re-anchor); `auto`
-    follows LC_ALL / LANG as the anchor does. Best effort: any failure -> en, never
-    an INFRA_ERROR.
+    defaults.yaml is not in the gates provenance digest, so no re-anchor). `auto`
+    means en here: the gate reads no env knobs (GAP-04/D2). Best effort: any
+    failure -> en, never an INFRA_ERROR.
     """
     explicit = str(cfg.get("locale") or "").strip().lower()
     if explicit in ("ko", "en"):
@@ -1475,8 +1475,6 @@ def _gate_locale(cfg: dict, root: Path | None = None) -> str:
                 if line.startswith("output_locale:"):
                     value = line.partition(":")[2].strip().strip('"').strip("'").lower()
                     break
-        if value in ("", "auto"):
-            value = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").lower()
         return "ko" if value.startswith("ko") else "en"
     except Exception:  # noqa: BLE001 - a display preference must never fail the gate
         return "en"
